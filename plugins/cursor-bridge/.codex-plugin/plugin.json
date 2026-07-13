@@ -1,0 +1,18 @@
+{
+  "name": "cursor-bridge",
+  "version": "0.1.0",
+  "description": "Cursor Bridge plugin",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Cursor Bridge",
+    "shortDescription": "Use Cursor Bridge in Codex.",
+    "longDescription": "Cursor Bridge adds a local Codex plugin scaffold.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Help me use Cursor Bridge."
+  }
+}

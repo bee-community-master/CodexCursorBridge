@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.DS_Store
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.cursor-bridge-local/
