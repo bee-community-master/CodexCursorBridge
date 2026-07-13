@@ -1,33 +1,52 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { installCodexRegistration, renderCursorAgentConfig } from "../src/bootstrap.js";
+import { installCodexRegistration } from "../src/bootstrap.js";
 
-describe("portable CURSOR role", () => {
-  it("pins Luna medium and exposes only four Cursor Bridge tools", () => {
-    const config = renderCursorAgentConfig("/clone/codingAgent");
-    expect(config).toContain('name = "cursor"');
-    expect(config).toContain('description = "Delegates approved coding tasks to Cursor Bridge"');
-    expect(config).toContain('model = "gpt-5.6-luna"');
-    expect(config).toContain('model_reasoning_effort = "medium"');
-    expect(config).toContain('sandbox_mode = "read-only"');
-    expect(config).toContain('"cursor_start_task"');
-    expect(config).toContain('"cursor_get_task"');
-    expect(config).toContain('"cursor_cancel_task"');
-    expect(config).toContain('"cursor_get_report"');
-    expect(config).not.toContain("CURSOR_API_KEY");
-  });
-
-  it("preserves existing Codex config and is idempotent across clone paths", async () => {
+describe("portable main Codex MCP registration", () => {
+  it("preserves existing config and updates absolute clone paths idempotently", async () => {
     const codexHome = await mkdtemp(path.join(tmpdir(), "cursor-codex-home-"));
     await writeFile(path.join(codexHome, "config.toml"), 'model = "gpt-5.6-sol"\n', "utf8");
+
     await installCodexRegistration("/first/clone", codexHome);
     await installCodexRegistration("/second/clone", codexHome);
+
     const config = await readFile(path.join(codexHome, "config.toml"), "utf8");
-    const agent = await readFile(path.join(codexHome, "agents", "cursor.toml"), "utf8");
     expect(config).toContain('model = "gpt-5.6-sol"');
-    expect(config.match(/\[agents\.cursor\]/g)).toHaveLength(1);
-    expect(agent).toContain("/second/clone/dist/mcp.js");
+    expect(config.match(/\[mcp_servers\.cursor_bridge\]/g)).toHaveLength(1);
+    expect(config).toContain('/second/clone/dist/mcp.js');
+    expect(config).not.toContain("[agents.cursor]");
+  });
+
+  it("migrates and removes the obsolete CURSOR custom-agent file", async () => {
+    const codexHome = await mkdtemp(path.join(tmpdir(), "cursor-codex-home-"));
+    const agentsDir = path.join(codexHome, "agents");
+    const agentFile = path.join(agentsDir, "cursor.toml");
+    await mkdir(agentsDir, { recursive: true });
+    await writeFile(agentFile, "# Managed by codex-cursor-bridge bootstrap\nname = \"cursor\"\n", "utf8");
+    await writeFile(
+      path.join(codexHome, "config.toml"),
+      "# BEGIN cursor-bridge managed CURSOR agent\n[agents.cursor]\nconfig_file = \"/tmp/cursor.toml\"\n# END cursor-bridge managed CURSOR agent\n",
+      "utf8",
+    );
+
+    await installCodexRegistration("/clone", codexHome);
+
+    await expect(access(agentFile)).rejects.toThrow();
+    const config = await readFile(path.join(codexHome, "config.toml"), "utf8");
+    expect(config).not.toContain("[agents.cursor]");
+    expect(config).toContain("[mcp_servers.cursor_bridge]");
+  });
+
+  it("refuses to overwrite an unmanaged MCP registration", async () => {
+    const codexHome = await mkdtemp(path.join(tmpdir(), "cursor-codex-home-"));
+    await writeFile(
+      path.join(codexHome, "config.toml"),
+      '[mcp_servers.cursor_bridge]\ncommand = "custom"\n',
+      "utf8",
+    );
+
+    await expect(installCodexRegistration("/clone", codexHome)).rejects.toThrow(/unmanaged/);
   });
 });
