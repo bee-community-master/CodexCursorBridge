@@ -20,6 +20,7 @@
     "task:approve": "tsx src/cli.ts task:approve",
     "models:list": "tsx src/cli.ts models:list",
     "smoke:mcp": "node dist/smoke-mcp.js",
+    "smoke:cursor": "node dist/smoke-cursor-live.js",
     "mcp": "node dist/mcp.js",
     "worker": "node dist/worker.js"
   },

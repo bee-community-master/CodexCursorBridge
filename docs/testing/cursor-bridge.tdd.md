@@ -21,7 +21,7 @@ The source was the approved implementation plan in the Codex task. It was normal
 | RED: workflow publication | `474e47d` | Workflow suite failed on missing orchestration module. |
 | GREEN: workflow publication | `c21192b` | Verified publication and scope-violation preservation cases passed. |
 | RED: portable CURSOR role | `a5abadb` | Bootstrap suite failed on missing role renderer. |
-| GREEN: full bridge | Current branch | Full verify, plugin validation, temporary Codex-home parse, marketplace install, and MCP smoke passed. |
+| GREEN: full bridge | Current branch | Full verify, plugin validation, temporary Codex-home parse, marketplace install, MCP smoke, and sandboxed live Grok smoke passed. |
 
 ## Guarantees
 
@@ -40,7 +40,9 @@ The source was the approved implementation plan in the Codex task. It was normal
 
 ## Final verification
 
-- `pnpm verify`: PASS — lint, typecheck, 25 tests, coverage, build, MCP smoke.
+- `pnpm verify`: PASS — lint, typecheck, 27 tests, coverage, build, MCP smoke.
+- `pnpm smoke:cursor`: PASS — selected `grok-4.5`, local sandbox enabled, disposable repository remained clean.
+- Clean-clone install simulation: PASS — pnpm publicly hoisted only the Cursor platform helper so SDK sandbox discovery works across clone paths.
 - Coverage: statements 95.31%, branches 84.84%, functions 100%, lines 99.03% for the core policy modules.
 - `codex --strict-config doctor` against a temporary `CODEX_HOME`: config parse PASS; auth intentionally absent in the temporary home.
 - Repo-local marketplace and `cursor-bridge@coding-agent` install in a temporary `CODEX_HOME`: PASS.
@@ -48,6 +50,5 @@ The source was the approved implementation plan in the Codex task. It was normal
 
 ## Known gaps
 
-- The real Cursor model-list and Grok execution smoke requires the user to run `pnpm bootstrap` and enter the API key in a local TTY; no key existed during this run.
 - The repository has no remote, so its own push/draft-PR smoke and draft PR creation remain unavailable until a remote is configured.
 - v1 credential installation targets macOS Keychain; Linux and Windows backends are intentionally out of scope.

@@ -64,4 +64,13 @@ pnpm verify
 python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/cursor-bridge
 ```
 
+After bootstrap, verify the selected Grok model, Cursor authentication, local sandbox, and a clean
+disposable Git run with:
+
+```bash
+pnpm smoke:cursor
+```
+
+The smoke creates and removes a temporary local repository. It neither pushes nor creates a PR.
+
 Because this repository currently has no remote, its own draft PR cannot be created until a remote is configured.
