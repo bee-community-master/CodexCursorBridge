@@ -43,6 +43,10 @@ The source was the approved implementation plan in the Codex task. It was normal
 - `pnpm verify`: PASS — lint, typecheck, 27 tests, coverage, build, MCP smoke.
 - `pnpm smoke:cursor`: PASS — selected `grok-4.5`, local sandbox enabled, disposable repository remained clean.
 - Clean-clone install simulation: PASS — pnpm publicly hoisted only the Cursor platform helper so SDK sandbox discovery works across clone paths.
+- CURSOR custom-role dispatch smoke: BLOCKED on Codex CLI 0.144.1 — the active multi-agent v2
+  `spawn_agent` surface spawned a generic child without the role-scoped MCP tools. The generated role now
+  includes the required `name`, `description`, and `developer_instructions`, but runtime role selection
+  still needs verification after Codex exposes custom-agent selection in the collaboration tool.
 - Coverage: statements 95.31%, branches 84.84%, functions 100%, lines 99.03% for the core policy modules.
 - `codex --strict-config doctor` against a temporary `CODEX_HOME`: config parse PASS; auth intentionally absent in the temporary home.
 - Repo-local marketplace and `cursor-bridge@coding-agent` install in a temporary `CODEX_HOME`: PASS.
