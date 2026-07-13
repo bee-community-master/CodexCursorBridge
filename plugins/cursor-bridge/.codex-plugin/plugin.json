@@ -1,7 +1,7 @@
 {
   "name": "cursor-bridge",
-  "version": "0.1.0",
-  "description": "Delegate approved Codex tasks to Cursor in isolated Git worktrees.",
+  "version": "0.1.0+codex.20260713012100",
+  "description": "Delegate approved Codex tasks directly to asynchronous Cursor workers in isolated Git worktrees.",
   "author": {
     "name": "bee-community-master"
   },
@@ -9,13 +9,15 @@
   "interface": {
     "displayName": "Cursor Bridge",
     "shortDescription": "Delegate approved coding tasks to Cursor.",
-    "longDescription": "Adds the task authoring and delegation workflow for the isolated CURSOR Codex role and Cursor Bridge MCP.",
+    "longDescription": "Adds a task authoring and direct asynchronous delegation workflow for the main Codex agent and Cursor Bridge MCP.",
     "developerName": "bee-community-master",
     "category": "Productivity",
-    "capabilities": ["Write"],
+    "capabilities": [
+      "Write"
+    ],
     "defaultPrompt": [
       "Create an approved Cursor task packet.",
-      "Delegate this approved task to CURSOR.",
+      "Start this approved task with Cursor Bridge.",
       "Check the latest Cursor task status."
     ]
   }

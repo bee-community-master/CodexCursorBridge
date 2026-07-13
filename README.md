@@ -1,6 +1,6 @@
 # Codex Cursor Bridge
 
-Codex plans and approves a versioned Task; the isolated `CURSOR` role delegates it to Cursor in a dedicated Git worktree. The Bridge independently checks scope and verification before pushing to an existing PR or creating a draft PR.
+Codex plans and approves a versioned Task, then calls Cursor Bridge directly. The Bridge starts Cursor in a detached worker and immediately returns a job ID. It independently checks scope and verification before pushing to an existing PR or creating a draft PR.
 
 ## Requirements
 
@@ -18,7 +18,7 @@ pnpm install --frozen-lockfile
 pnpm bootstrap
 ```
 
-`pnpm bootstrap` builds the bridge, stores the Cursor API key in macOS Keychain, asks you to choose an exact available Grok model, installs the repo-local `cursor-bridge` plugin, and registers `~/.codex/agents/cursor.toml`. Restart Codex and start a new task afterward.
+`pnpm bootstrap` builds the bridge, stores the Cursor API key in macOS Keychain, asks you to choose an exact available Grok model, installs the repo-local `cursor-bridge` plugin, and registers the Bridge MCP in `~/.codex/config.toml`. Restart Codex and start a new task afterward. Upgrading from the earlier custom-agent version removes only its managed `[agents.cursor]` block and managed `~/.codex/agents/cursor.toml` file.
 
 Machine-local repository paths and model choice live in `~/.config/codex-cursor-bridge/config.json`; jobs, reports, and logs remain beside it. They are never committed.
 
@@ -41,7 +41,7 @@ git add tasks/my-service/TASK-001.yaml
 git commit -m "docs: approve TASK-001"
 ```
 
-Ask Codex to delegate the alias, Task ID, spec version, and printed hash to the `CURSOR` role. The role exposes only start/status/cancel/report MCP tools.
+Ask Codex to start the approved alias, Task ID, spec version, and printed hash. The main Codex agent calls `cursor_start_task` directly and receives a job ID immediately; Cursor continues in a detached worker. Later, ask Codex to check, cancel, or report that job using the other three MCP tools.
 
 ## Update or uninstall
 
@@ -55,7 +55,7 @@ pnpm uninstall
 pnpm uninstall -- --delete-key
 ```
 
-Bootstrap is idempotent and backs up `~/.codex/config.toml` before replacing its marked `[agents.cursor]` block. Uninstall preserves job history and registered repository data.
+Bootstrap is idempotent and backs up `~/.codex/config.toml` before replacing its marked `[mcp_servers.cursor_bridge]` block. It refuses to overwrite an unmanaged MCP block with the same name. Uninstall preserves job history and registered repository data.
 
 ## Development verification
 

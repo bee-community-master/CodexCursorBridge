@@ -1,11 +1,11 @@
 ---
 name: cursor-delegation
-description: Create, approve, dispatch, monitor, cancel, and review coding tasks delegated from Codex to Cursor Bridge. Use when the user asks CURSOR to implement an approved task or asks about a Cursor Bridge job.
+description: Create, approve, dispatch, monitor, cancel, and review asynchronous coding tasks delegated directly from the main Codex agent to Cursor Bridge.
 ---
 
 # Cursor Delegation
 
-Use the `CURSOR` custom agent only after the user has approved a committed Task packet.
+The main Codex agent calls the narrow Cursor Bridge MCP tools directly. The bridge runs Cursor in a detached worker, so starting a job does not occupy the Codex task until implementation finishes.
 
 ## Task authoring
 
@@ -18,9 +18,11 @@ Use the `CURSOR` custom agent only after the user has approved a committed Task 
 
 ## Dispatch
 
-Spawn the `cursor` role with only the repository alias, Task ID, spec version, and spec hash. The role must call `cursor_start_task` exactly once and return the job ID. Do not pass conversation history, a free-form prompt, shell commands, or repository paths through MCP.
+Call `cursor_start_task` directly with only the repository alias, Task ID, spec version, and spec hash. Call it exactly once for an approved spec. It returns a job ID without waiting for Cursor to finish. Report that job ID and the initial status to the user; do not continuously poll unless the user asks to wait or check progress.
 
-Use `cursor_get_task` to monitor, `cursor_cancel_task` only on explicit cancellation, and `cursor_get_report` after a terminal state. Completion requires Bridge verification and a PR URL, not Cursor's final prose.
+Do not pass conversation history, a free-form prompt, shell commands, or repository paths through MCP. The committed and hash-locked Task packet is the only implementation contract.
+
+Use `cursor_get_task` for an explicit status check, `cursor_cancel_task` only on explicit cancellation, and `cursor_get_report` after a terminal state. Completion requires Bridge verification and a PR URL, not Cursor's final prose.
 
 ## Stop conditions
 
