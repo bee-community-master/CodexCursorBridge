@@ -6,48 +6,10 @@ import { createInterface } from "node:readline/promises";
 import { emptyMachineConfig, loadMachineConfig, runtimePaths, saveMachineConfig } from "./config.js";
 import { runFile } from "./git.js";
 import { deleteCursorApiKey, storeCursorApiKey } from "./keychain.js";
-import { removeManagedAgentBlock, upsertManagedAgentBlock } from "./managed-config.js";
+import { removeManagedRegistrationBlocks, upsertManagedMcpBlock } from "./managed-config.js";
 
 const agentMarker = "# Managed by codex-cursor-bridge bootstrap";
 const marketplaceName = "coding-agent";
-
-function escapeToml(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-}
-
-export function renderCursorAgentConfig(projectRoot: string): string {
-  const root = path.resolve(projectRoot);
-  return `${agentMarker}
-name = "cursor"
-description = "Delegates approved coding tasks to Cursor Bridge"
-model = "gpt-5.6-luna"
-model_reasoning_effort = "medium"
-sandbox_mode = "read-only"
-approval_policy = "never"
-developer_instructions = """
-You are CURSOR, a delegation agent. Never edit product files directly.
-Accept only an approved repository alias, Task ID, spec version, and spec hash.
-Use only the cursor_bridge MCP tools. Start a task exactly once, return the job ID,
-monitor it when asked, and report exact status, artifacts, verification, PR URL, and errors.
-Never rewrite requirements, invent a free-form Cursor prompt, or retry a stale/blocked task.
-"""
-
-[mcp_servers.cursor_bridge]
-command = "node"
-args = ["${escapeToml(path.join(root, "dist", "mcp.js"))}"]
-cwd = "${escapeToml(root)}"
-env = { CURSOR_BRIDGE_ROOT = "${escapeToml(root)}" }
-enabled_tools = [
-  "cursor_start_task",
-  "cursor_get_task",
-  "cursor_cancel_task",
-  "cursor_get_report",
-]
-startup_timeout_sec = 20
-tool_timeout_sec = 45
-default_tools_approval_mode = "approve"
-`;
-}
 
 async function readSecret(prompt: string): Promise<string> {
   if (!process.stdin.isTTY || !process.stdin.setRawMode) throw new Error("Interactive terminal is required for secret input");
@@ -112,20 +74,24 @@ async function installPlugin(projectRoot: string): Promise<void> {
   await runFile("codex", ["plugin", "add", `cursor-bridge@${marketplaceName}`]);
 }
 
-export async function installCodexRegistration(projectRoot: string, codexHome: string): Promise<{ agentFile: string; configFile: string }> {
-  const agentsDir = path.join(codexHome, "agents");
-  const agentFile = path.join(agentsDir, "cursor.toml");
+export async function installCodexRegistration(projectRoot: string, codexHome: string): Promise<{ configFile: string }> {
   const configFile = path.join(codexHome, "config.toml");
-  await mkdir(agentsDir, { recursive: true, mode: 0o700 });
-  await writeFile(agentFile, renderCursorAgentConfig(projectRoot), { encoding: "utf8", mode: 0o600 });
+  const legacyAgentFile = path.join(codexHome, "agents", "cursor.toml");
+  await mkdir(codexHome, { recursive: true, mode: 0o700 });
 
   let config = "";
   try { config = await readFile(configFile, "utf8"); } catch { /* New Codex home. */ }
-  const clean = removeManagedAgentBlock(config);
-  if (/^\[agents\.cursor\]\s*$/m.test(clean)) throw new Error("An unmanaged [agents.cursor] role already exists");
+  const clean = removeManagedRegistrationBlocks(config);
+  if (/^\[mcp_servers\.cursor_bridge\]\s*$/m.test(clean)) {
+    throw new Error("An unmanaged [mcp_servers.cursor_bridge] registration already exists");
+  }
   if (config) await copyFile(configFile, `${configFile}.cursor-bridge-backup-${Date.now()}`);
-  await writeFile(configFile, upsertManagedAgentBlock(config, agentFile), { encoding: "utf8", mode: 0o600 });
-  return { agentFile, configFile };
+  await writeFile(configFile, upsertManagedMcpBlock(config, projectRoot), { encoding: "utf8", mode: 0o600 });
+  try {
+    const legacyAgent = await readFile(legacyAgentFile, "utf8");
+    if (legacyAgent.startsWith(agentMarker)) await rm(legacyAgentFile);
+  } catch { /* No managed legacy agent file. */ }
+  return { configFile };
 }
 
 export async function bootstrap(projectRoot: string): Promise<void> {
@@ -148,7 +114,7 @@ export async function bootstrap(projectRoot: string): Promise<void> {
   const codexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
   await installCodexRegistration(projectRoot, codexHome);
   await installPlugin(projectRoot);
-  process.stdout.write(`Installed CURSOR role with model gpt-5.6-luna/medium and Cursor model ${cursorModelId}.\nRestart Codex and open a new task.\n`);
+  process.stdout.write(`Installed Cursor Bridge MCP for the main Codex agent with Cursor model ${cursorModelId}.\nRestart Codex and open a new task.\n`);
 }
 
 export async function uninstall(projectRoot: string, deleteKey: boolean): Promise<void> {
@@ -157,7 +123,7 @@ export async function uninstall(projectRoot: string, deleteKey: boolean): Promis
   const agentFile = path.join(codexHome, "agents", "cursor.toml");
   try {
     const config = await readFile(configFile, "utf8");
-    await writeFile(configFile, removeManagedAgentBlock(config), { encoding: "utf8", mode: 0o600 });
+    await writeFile(configFile, removeManagedRegistrationBlocks(config), { encoding: "utf8", mode: 0o600 });
   } catch { /* Already absent. */ }
   try {
     const agent = await readFile(agentFile, "utf8");
