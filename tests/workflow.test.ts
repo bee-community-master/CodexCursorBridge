@@ -35,7 +35,7 @@ function adapter(files: string[]): WorkflowAdapter {
     prepare: vi.fn(async () => ({ worktree: "/worktree", baseSha: "base", pushBranch: "codex/cursor/task-demo" })),
     runCursor: vi.fn(async () => ({ agentId: "agent", runId: "run", summary: "implemented" })),
     collectChanges: vi.fn(async () => ({ files, deletedFiles: [], diffLines: 10 })),
-    runVerification: vi.fn(async () => [{ command: "pnpm test", status: "passed", durationMs: 1 }]),
+    runVerification: vi.fn(async () => [{ command: "pnpm test", status: "passed" as const, durationMs: 1 }]),
     publish: vi.fn(async () => ({ prUrl: "https://github.com/owner/repo/pull/1" })),
     writeReport: vi.fn(async () => "/report.md"),
     cleanup: vi.fn(async () => undefined),
