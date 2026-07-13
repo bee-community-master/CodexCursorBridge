@@ -7,6 +7,8 @@ import { installCodexRegistration, renderCursorAgentConfig } from "../src/bootst
 describe("portable CURSOR role", () => {
   it("pins Luna medium and exposes only four Cursor Bridge tools", () => {
     const config = renderCursorAgentConfig("/clone/codingAgent");
+    expect(config).toContain('name = "cursor"');
+    expect(config).toContain('description = "Delegates approved coding tasks to Cursor Bridge"');
     expect(config).toContain('model = "gpt-5.6-luna"');
     expect(config).toContain('model_reasoning_effort = "medium"');
     expect(config).toContain('sandbox_mode = "read-only"');

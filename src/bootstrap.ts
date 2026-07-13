@@ -18,6 +18,8 @@ function escapeToml(value: string): string {
 export function renderCursorAgentConfig(projectRoot: string): string {
   const root = path.resolve(projectRoot);
   return `${agentMarker}
+name = "cursor"
+description = "Delegates approved coding tasks to Cursor Bridge"
 model = "gpt-5.6-luna"
 model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
