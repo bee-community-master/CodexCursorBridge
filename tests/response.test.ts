@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { errorResponse, successResponse } from "../src/response.js";
+import { errorResponse, successResponse, warningResponse } from "../src/response.js";
 
 describe("tool responses", () => {
   it("uses the deterministic observation contract", () => {
@@ -9,6 +9,10 @@ describe("tool responses", () => {
       next_actions: ["next"],
       artifacts: { report: "/tmp/report" },
     });
-    expect(errorResponse("bad", "root", "retry", "stop").status).toBe("error");
+    expect(warningResponse("wait").status).toBe("warning");
+    expect(errorResponse("bad", "root", "retry", "stop")).toMatchObject({
+      status: "error",
+      error: { root_cause: "root", safe_retry: "retry", stop_condition: "stop" },
+    });
   });
 });

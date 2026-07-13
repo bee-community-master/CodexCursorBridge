@@ -20,4 +20,16 @@ describe("machine-local configuration", () => {
     expect(next.repositories.demo?.origin).toBe("owner/repo");
     expect(() => addRepository(next, "demo", { root: "/other", origin: "owner/other", defaultBranch: "main" })).toThrow();
   });
+
+  it("allows changing the selected model while preserving repositories", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "cursor-config-update-"));
+    const file = path.join(dir, "config.json");
+    const configured = addRepository(
+      { cursorModelId: "grok-old", repositories: {} },
+      "demo",
+      { root: "/repo", origin: "owner/repo", defaultBranch: "main" },
+    );
+    await saveMachineConfig(file, { ...configured, cursorModelId: "grok-new" });
+    expect((await loadMachineConfig(file)).repositories.demo?.root).toBe("/repo");
+  });
 });

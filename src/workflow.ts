@@ -8,6 +8,7 @@ export interface PreparedWorktree {
   worktree: string;
   baseSha: string;
   pushBranch: string;
+  localBranch: string;
 }
 
 export interface CursorExecution {

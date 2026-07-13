@@ -2,7 +2,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { approveTaskFile, computeSpecHash, parseTask } from "../src/task.js";
+import { approveTaskFile, assertApprovedTask, computeSpecHash, parseTask } from "../src/task.js";
 
 const task = {
   id: "TASK-001",
@@ -46,5 +46,15 @@ describe("task contract", () => {
     expect(approved.status).toBe("approved");
     expect(approved.spec_hash).toBe(computeSpecHash(approved));
     expect(await readFile(file, "utf8")).toContain("status: approved");
+  });
+
+  it("rejects draft and stale approved specs", () => {
+    const approved = parseTask({ ...task, status: "approved" });
+    const hash = computeSpecHash(approved);
+    expect(() => assertApprovedTask(parseTask(task), 1, hash)).toThrow(/not approved/);
+    expect(() => assertApprovedTask(approved, 1, hash)).toThrow(/hash/);
+    expect(() => assertApprovedTask(parseTask({ ...approved, spec_hash: hash }), 2, hash)).toThrow(/version/);
+    expect(() => assertApprovedTask(parseTask({ ...approved, spec_hash: hash }), 1, `sha256:${"b".repeat(64)}`)).toThrow(/hash/);
+    expect(() => assertApprovedTask(parseTask({ ...approved, spec_hash: hash }), 1, hash)).not.toThrow();
   });
 });

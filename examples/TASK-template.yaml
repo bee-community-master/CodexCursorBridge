@@ -1,0 +1,35 @@
+id: TASK-DEMO
+repository: demo
+title: Replace with a concise implementation title
+spec_version: 1
+status: draft
+goal: Describe the concrete outcome.
+context_files:
+  - AGENTS.md
+allowed_paths:
+  - src/**
+  - tests/**
+forbidden_paths:
+  - .env
+  - infrastructure/**
+non_goals:
+  - Describe work that must not be included.
+acceptance_criteria:
+  - Describe an objectively testable result.
+implementation_constraints:
+  - Do not add runtime dependencies without approval.
+verification:
+  commands:
+    - command: pnpm
+      args: [test]
+      timeout_seconds: 900
+required_new_tests:
+  - Add a regression test for the changed behavior.
+limits:
+  max_changed_files: 8
+  max_diff_lines: 500
+  allow_test_deletion: false
+stop_conditions:
+  - A forbidden path or production system is required.
+pull_request:
+  mode: new_draft

@@ -1,7 +1,7 @@
 {
-  "name": "personal",
+  "name": "coding-agent",
   "interface": {
-    "displayName": "Personal"
+    "displayName": "Coding Agent Local"
   },
   "plugins": [
     {

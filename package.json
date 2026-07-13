@@ -13,12 +13,13 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "verify": "pnpm lint && pnpm typecheck && pnpm test:coverage && pnpm build",
+    "verify": "pnpm lint && pnpm typecheck && pnpm test:coverage && pnpm build && pnpm smoke:mcp",
     "bootstrap": "tsx src/cli.ts bootstrap",
     "uninstall": "tsx src/cli.ts uninstall",
     "repo:add": "tsx src/cli.ts repo:add",
     "task:approve": "tsx src/cli.ts task:approve",
     "models:list": "tsx src/cli.ts models:list",
+    "smoke:mcp": "node dist/smoke-mcp.js",
     "mcp": "node dist/mcp.js",
     "worker": "node dist/worker.js"
   },
@@ -26,17 +27,17 @@
     "@cursor/sdk": "1.0.23",
     "@modelcontextprotocol/sdk": "1.29.0",
     "minimatch": "10.2.4",
-    "yaml": "2.8.2",
+    "yaml": "2.8.3",
     "zod": "4.3.6"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",
     "@types/node": "24.10.1",
-    "@vitest/coverage-v8": "4.0.18",
+    "@vitest/coverage-v8": "4.1.10",
     "eslint": "9.39.1",
     "tsx": "4.21.0",
     "typescript": "5.9.3",
     "typescript-eslint": "8.48.1",
-    "vitest": "4.0.18"
+    "vitest": "4.1.10"
   }
 }

@@ -10,4 +10,10 @@ describe("managed Codex config", () => {
     expect(twice.match(/BEGIN cursor-bridge/g)).toHaveLength(1);
     expect(removeManagedAgentBlock(twice)).toBe(original);
   });
+
+  it("is idempotent for absent blocks and rejects malformed managed blocks", () => {
+    expect(removeManagedAgentBlock("model = \"x\"\n")).toBe("model = \"x\"\n");
+    expect(() => removeManagedAgentBlock("# BEGIN cursor-bridge managed CURSOR agent\n")).toThrow(/Malformed/);
+    expect(upsertManagedAgentBlock("", "/tmp/cursor.toml")).toMatch(/^# BEGIN/);
+  });
 });

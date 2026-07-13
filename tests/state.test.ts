@@ -27,5 +27,7 @@ describe("job state", () => {
     store.transition(job.id, "RUNNING");
     store.transition(job.id, "VERIFYING");
     expect(store.get(job.id)?.status).toBe("VERIFYING");
+    expect(store.get("missing")).toBeUndefined();
+    expect(() => store.transition("missing", "RUNNING")).toThrow(/Unknown job/);
   });
 });

@@ -42,8 +42,8 @@ export interface Job extends CreateJobInput {
 }
 
 function rowToJob(row: Record<string, unknown>): Job {
-  const optionalString = (key: string): string | undefined => typeof row[key] === "string" ? row[key] as string : undefined;
-  const optionalNumber = (key: string): number | undefined => typeof row[key] === "number" ? row[key] as number : undefined;
+  const optionalString = (key: string): string | undefined => typeof row[key] === "string" ? row[key] : undefined;
+  const optionalNumber = (key: string): number | undefined => typeof row[key] === "number" ? row[key] : undefined;
   return {
     id: String(row.id), repositoryAlias: String(row.repository_alias), taskId: String(row.task_id),
     specVersion: Number(row.spec_version), specHash: String(row.spec_hash), status: String(row.status) as JobStatus,
@@ -68,6 +68,7 @@ export class JobStore {
     this.#database = new DatabaseSync(file);
     this.#database.exec(`
       PRAGMA journal_mode = WAL;
+      PRAGMA busy_timeout = 5000;
       CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY, repository_alias TEXT NOT NULL, task_id TEXT NOT NULL,
         spec_version INTEGER NOT NULL, spec_hash TEXT NOT NULL, status TEXT NOT NULL,

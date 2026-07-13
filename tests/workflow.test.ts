@@ -32,7 +32,7 @@ async function fixture(): Promise<{ store: JobStore; jobId: string }> {
 
 function adapter(files: string[]): WorkflowAdapter {
   return {
-    prepare: vi.fn(async () => ({ worktree: "/worktree", baseSha: "base", pushBranch: "codex/cursor/task-demo" })),
+    prepare: vi.fn(async () => ({ worktree: "/worktree", baseSha: "base", pushBranch: "codex/cursor/task-demo", localBranch: "codex/cursor/task-demo" })),
     runCursor: vi.fn(async () => ({ agentId: "agent", runId: "run", summary: "implemented" })),
     collectChanges: vi.fn(async () => ({ files, deletedFiles: [], diffLines: 10 })),
     runVerification: vi.fn(async () => [{ command: "pnpm test", status: "passed" as const, durationMs: 1 }]),
