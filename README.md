@@ -103,3 +103,7 @@ pnpm smoke:cursor
 ```
 
 `pnpm smoke:cursor`는 임시 로컬 저장소만 사용하며 push나 PR 생성은 하지 않습니다.
+의존성 방향과 composition root 원칙은
+[`docs/architecture/cursor-bridge.md`](docs/architecture/cursor-bridge.md)에 정리되어
+있으며 `tests/architecture.test.ts`가 계층 역참조, import cycle, 과대 구현 파일과
+과대 테스트 스위트를 검사합니다.

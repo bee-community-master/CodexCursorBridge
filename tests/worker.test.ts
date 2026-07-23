@@ -2,8 +2,11 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { WorkflowAdapter } from "../src/application/workflow-ports.js";
 import type { RuntimePaths } from "../src/config.js";
+import type { ApprovedTask } from "../src/domain/task.js";
 import { JobStore } from "../src/state.js";
+import type { WorkerDependencies } from "../src/worker.js";
 
 const mocks = vi.hoisted(() => ({
   loadMachineConfig: vi.fn(),
@@ -282,5 +285,66 @@ describe("worker lease fencing", () => {
     expect(store.listEvents(job.id).at(-1)).toMatchObject({
       type: "REPORT_PERSISTENCE_FAILED",
     });
+  });
+
+  it("accepts explicit composition dependencies without module mocking", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "cursor-worker-"));
+    const store = new JobStore(path.join(directory, "jobs.sqlite"));
+    stores.push(store);
+    const job = store.createOrGet({
+      repositoryAlias: "demo",
+      taskId: "TASK-DEMO",
+      specVersion: 1,
+      specHash: "sha256:a",
+      taskCommitSha: "a".repeat(40),
+      taskBlobSha: "b".repeat(40),
+      targetOrigin: "owner/demo",
+      targetBaseSha: "c".repeat(40),
+      policyVersion: 3,
+      maxAttempts: 2,
+    });
+    const claim = store.claimNext("worker", 60_000)!;
+    const paths = {
+      projectRoot: directory,
+      home: directory,
+      configFile: path.join(directory, "config.json"),
+      databaseFile: path.join(directory, "jobs.sqlite"),
+      logsDir: path.join(directory, "logs"),
+      reportsDir: path.join(directory, "reports"),
+      worktreesDir: path.join(directory, "worktrees"),
+      tasksDir: path.join(directory, "tasks"),
+    } satisfies RuntimePaths;
+    const repository = {
+      root: directory,
+      origin: "owner/demo",
+      defaultBranch: "main",
+    };
+    const fakeAdapter = {} as WorkflowAdapter;
+    const fakeTask = { id: "TASK-DEMO" } as ApprovedTask;
+    const dependencies = {
+      loadMachineConfig: vi.fn(async () => ({
+        cursorModelId: "grok-4.5",
+        repositories: { demo: repository },
+      })),
+      loadJobTask: vi.fn(async () => fakeTask),
+      createWorkflowAdapter: vi.fn(() => fakeAdapter),
+      executeWorkflow: vi.fn(async () => undefined),
+    } satisfies WorkerDependencies;
+
+    await processClaim(store, claim, paths, dependencies);
+
+    expect(dependencies.createWorkflowAdapter).toHaveBeenCalledWith(
+      paths,
+      expect.objectContaining({ repositories: { demo: repository } }),
+      store,
+      job.id,
+    );
+    expect(dependencies.executeWorkflow).toHaveBeenCalledWith(
+      store,
+      claim,
+      fakeTask,
+      repository,
+      fakeAdapter,
+    );
   });
 });

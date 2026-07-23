@@ -10,6 +10,17 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import type {
+  MachineConfig,
+  RepositoryConfig,
+  RuntimePaths,
+} from "./domain/configuration.js";
+
+export type {
+  MachineConfig,
+  RepositoryConfig,
+  RuntimePaths,
+} from "./domain/configuration.js";
 
 function hasNoControlCharacters(value: string): boolean {
   return ![...value].some((character) => {
@@ -33,20 +44,6 @@ const machineConfigSchema = z.object({
     .refine(hasNoControlCharacters, "Cursor model id contains control characters"),
   repositories: z.record(z.string().regex(/^[a-z0-9][a-z0-9-]*$/), repositorySchema),
 });
-
-export type RepositoryConfig = z.infer<typeof repositorySchema>;
-export type MachineConfig = z.infer<typeof machineConfigSchema>;
-
-export interface RuntimePaths {
-  projectRoot: string;
-  home: string;
-  configFile: string;
-  databaseFile: string;
-  logsDir: string;
-  reportsDir: string;
-  worktreesDir: string;
-  tasksDir: string;
-}
 
 export function runtimePaths(projectRoot = process.env.CURSOR_BRIDGE_ROOT ?? process.cwd()): RuntimePaths {
   const home = path.resolve(

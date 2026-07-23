@@ -1,15 +1,47 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { loadMachineConfig, type RuntimePaths } from "./config.js";
+import type {
+  PublicationStatePort,
+  WorkerStatePort,
+  WorkflowAdapter,
+} from "./application/workflow-ports.js";
+import { loadMachineConfig } from "./config.js";
 import { loadJobTask } from "./dispatch.js";
+import type {
+  MachineConfig,
+  RuntimePaths,
+} from "./domain/configuration.js";
+import {
+  terminalJobStatuses,
+  type ClaimedWork,
+} from "./domain/job.js";
 import { safeErrorMessage } from "./redaction.js";
 import { RealWorkflowAdapter } from "./real-adapter.js";
-import { terminalJobStatuses, type ClaimedWork, type JobStore } from "./state.js";
 import { executeWorkflow } from "./workflow.js";
 
+export interface WorkerDependencies {
+  loadMachineConfig: typeof loadMachineConfig;
+  loadJobTask: typeof loadJobTask;
+  createWorkflowAdapter(
+    paths: RuntimePaths,
+    config: MachineConfig,
+    store: PublicationStatePort,
+    jobId: string,
+  ): WorkflowAdapter;
+  executeWorkflow: typeof executeWorkflow;
+}
+
+const defaultWorkerDependencies: WorkerDependencies = {
+  loadMachineConfig,
+  loadJobTask,
+  createWorkflowAdapter: (paths, config, store, jobId) =>
+    new RealWorkflowAdapter(paths, config, store, jobId),
+  executeWorkflow,
+};
+
 async function confirmPendingCancellation(
-  store: JobStore,
-  adapter: RealWorkflowAdapter | undefined,
+  store: WorkerStatePort,
+  adapter: WorkflowAdapter | undefined,
   jobId: string,
   workerToken: string,
 ): Promise<void> {
@@ -42,7 +74,7 @@ async function confirmPendingCancellation(
 
 async function writePreflightReport(
   reportsDir: string,
-  store: JobStore,
+  store: WorkerStatePort,
   jobId: string,
   message: string,
 ): Promise<void> {
@@ -64,7 +96,7 @@ async function writePreflightReport(
 
 async function tryWritePreflightReport(
   reportsDir: string,
-  store: JobStore,
+  store: WorkerStatePort,
   jobId: string,
   message: string,
 ): Promise<void> {
@@ -85,22 +117,23 @@ async function tryWritePreflightReport(
 }
 
 export async function processClaim(
-  store: JobStore,
+  store: WorkerStatePort,
   claim: ClaimedWork,
   paths: RuntimePaths,
+  dependencies: WorkerDependencies = defaultWorkerDependencies,
 ): Promise<void> {
   const jobId = claim.job.id;
-  let adapter: RealWorkflowAdapter | undefined;
+  let adapter: WorkflowAdapter | undefined;
   try {
-    const config = await loadMachineConfig(paths.configFile);
+    const config = await dependencies.loadMachineConfig(paths.configFile);
     const repository = config.repositories[claim.job.repositoryAlias];
     if (!repository) {
       throw new Error(`Repository alias is not registered: ${claim.job.repositoryAlias}`);
     }
-    adapter = new RealWorkflowAdapter(paths, config, store, jobId);
+    adapter = dependencies.createWorkflowAdapter(paths, config, store, jobId);
     let task;
     try {
-      task = await loadJobTask(paths, repository, claim.job);
+      task = await dependencies.loadJobTask(paths, repository, claim.job);
     } catch (error) {
       const message = safeErrorMessage(error);
       const current = store.get(jobId);
@@ -124,7 +157,7 @@ export async function processClaim(
       await tryWritePreflightReport(paths.reportsDir, store, jobId, message);
       return;
     }
-    await executeWorkflow(store, claim, task, repository, adapter);
+    await dependencies.executeWorkflow(store, claim, task, repository, adapter);
   } catch (error) {
     const message = safeErrorMessage(error);
     const current = store.get(jobId);

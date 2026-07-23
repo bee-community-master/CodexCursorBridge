@@ -1,11 +1,17 @@
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import os from "node:os";
 import path from "node:path";
-import type { MachineConfig, RepositoryConfig, RuntimePaths } from "../src/config.js";
-import type { Attempt, Effect, Job, JobStore } from "../src/state.js";
-import type { ApprovedTask } from "../src/task.js";
-import type { PublicationInput } from "../src/workflow.js";
+import type { Job, JobStore } from "../src/state.js";
+import {
+  approvedTask as task,
+  config,
+  durableEffect,
+  paths,
+  publicationInput,
+  publishingAttempt,
+  rawCommit,
+  repository,
+} from "./helpers/workflow-fixtures.js";
 
 const mocks = vi.hoisted(() => ({
   assertGitHubRemote: vi.fn(),
@@ -14,43 +20,37 @@ const mocks = vi.hoisted(() => ({
   git: vi.fn(),
   runFile: vi.fn(),
   collectChanges: vi.fn(),
+  collectTreeChanges: vi.fn(),
   computeCandidateTree: vi.fn(),
-}));
-const sdkMocks = vi.hoisted(() => ({
-  create: vi.fn(),
-  resume: vi.fn(),
-  getRun: vi.fn(),
-  cancelRun: vi.fn(),
-  modelsList: vi.fn(),
 }));
 
 vi.mock("../src/git.js", () => mocks);
-vi.mock("../src/keychain.js", () => ({
-  readCursorApiKey: vi.fn(async () => "cursor-key"),
+vi.mock("../src/adapters/command-runner.js", () => ({
+  runFile: mocks.runFile,
+}));
+vi.mock("../src/adapters/git-candidate.js", () => ({
+  collectChanges: mocks.collectChanges,
+  collectTreeChanges: mocks.collectTreeChanges,
+  computeCandidateTree: mocks.computeCandidateTree,
+}));
+vi.mock("../src/adapters/git-remote.js", () => ({
+  assertGitHubRemote: mocks.assertGitHubRemote,
+}));
+vi.mock("../src/adapters/git-runtime.js", () => ({
+  git: mocks.git,
+}));
+vi.mock("../src/adapters/git-worktree-identity.js", () => ({
+  assertWorktreeIdentity: mocks.assertWorktreeIdentity,
+  captureWorktreeIdentity: mocks.captureWorktreeIdentity,
 }));
 vi.mock("@cursor/sdk", () => ({
-  Agent: {
-    create: sdkMocks.create,
-    resume: sdkMocks.resume,
-    getRun: sdkMocks.getRun,
-    cancelRun: sdkMocks.cancelRun,
-  },
-  Cursor: { models: { list: sdkMocks.modelsList } },
+  Agent: {},
+  Cursor: { models: {} },
   JsonlLocalAgentStore: class JsonlLocalAgentStore {},
 }));
 
 const { RealWorkflowAdapter } = await import("../src/real-adapter.js");
 
-const paths: RuntimePaths = {
-  projectRoot: "/bridge", home: "/home", configFile: "/home/config.json", databaseFile: "/home/jobs.sqlite",
-  logsDir: "/home/logs", reportsDir: "/home/reports", worktreesDir: path.join(os.tmpdir(), "cursor-adapter-tests"), tasksDir: "/bridge/tasks",
-};
-const config: MachineConfig = {
-  cursorModelId: "grok-4.5",
-  repositories: { demo: { root: "/repo", origin: "owner/repo", defaultBranch: "main" } },
-};
-const repository: RepositoryConfig = config.repositories.demo!;
-const now = "2026-07-23T00:00:00.000Z";
 const store = {
   get: vi.fn(() => undefined),
   getAttempt: vi.fn(() => undefined),
@@ -77,6 +77,7 @@ beforeEach(async () => {
   });
   mocks.runFile.mockReset();
   mocks.collectChanges.mockReset();
+  mocks.collectTreeChanges.mockReset();
   mocks.computeCandidateTree.mockReset();
   vi.mocked(store.get).mockReset().mockReturnValue(undefined);
   vi.mocked(store.getAttempt).mockReset().mockReturnValue(undefined);
@@ -86,99 +87,10 @@ beforeEach(async () => {
   vi.mocked(store.completeEffect).mockReset();
   vi.mocked(store.update).mockReset();
   vi.mocked(store.updateAttempt).mockReset();
-  sdkMocks.create.mockReset().mockRejectedValue(new Error("Unexpected new Cursor agent"));
-  sdkMocks.resume.mockReset().mockRejectedValue(new Error("Unexpected Cursor resume"));
-  sdkMocks.getRun.mockReset();
-  sdkMocks.cancelRun.mockReset();
-  sdkMocks.modelsList.mockReset().mockResolvedValue([{
-    id: "grok-4.5",
-    displayName: "Grok 4.5",
-  }]);
   await rm(paths.worktreesDir, { recursive: true, force: true });
 });
 
-function task(pullRequest: ApprovedTask["pull_request"]): ApprovedTask {
-  return {
-    id: "TASK-DEMO", repository: "demo", title: "Demo change", spec_version: 2, status: "approved",
-    spec_hash: `sha256:${"a".repeat(64)}`, policy_version: 3,
-    target: {
-      origin: "owner/repo",
-      base_ref: pullRequest.mode === "existing_pr" ? "feature/existing" : "main",
-      destination_ref: "main",
-      base_sha: "b".repeat(40),
-      context_digest: `sha256:${"c".repeat(64)}`,
-    },
-    approval: { approved_at: "2026-07-23T00:00:00.000Z", approved_by: "local-user" },
-    goal: "demo", context_files: [], allowed_paths: ["src/**"], forbidden_paths: [],
-    non_goals: [], acceptance_criteria: ["done"], implementation_constraints: [], required_new_tests: [],
-    verification: {
-      commands: [{ command: "pnpm", args: ["test"], timeout_seconds: 30 }],
-      profile_hash: `sha256:${"d".repeat(64)}`,
-    },
-    limits: {
-      max_changed_files: 3,
-      max_diff_lines: 100,
-      allow_test_deletion: false,
-      max_repair_attempts: 1,
-    },
-    stop_conditions: [],
-    pull_request: pullRequest,
-  };
-}
-
-function durableEffect(kind: string, idempotencyKey: string): Effect {
-  return {
-    id: `effect-${kind}`,
-    jobId: "job",
-    attemptId: "attempt",
-    kind,
-    idempotencyKey,
-    status: "STARTED",
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
-function publishingAttempt(): Attempt {
-  return {
-    id: "attempt",
-    jobId: "job",
-    ordinal: 1,
-    status: "PUBLISHING",
-    workerToken: "worker",
-    leaseExpiresAt: "2026-07-23T01:00:00.000Z",
-    heartbeatAt: now,
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
-function publicationInput(treeHash = "e".repeat(40)): PublicationInput {
-  return {
-    tree: {
-      treeHash,
-      patchHash: `sha256:${"a".repeat(64)}`,
-    },
-    initialChanges: { files: ["src/demo.ts"], deletedFiles: [], diffLines: 1 },
-    finalChanges: { files: ["src/demo.ts"], deletedFiles: [], diffLines: 1 },
-    assessment: {
-      ok: true,
-      reasons: [],
-      allowed: ["src/demo.ts"],
-      forbidden: [],
-      outOfScope: [],
-    },
-    verification: [{ command: "pnpm test", status: "passed" as const, durationMs: 1 }],
-    attempts: [publishingAttempt()],
-    cursorSummary: "done",
-  };
-}
-
-function rawCommit(treeHash: string, parentSha: string): string {
-  return `tree ${treeHash}\nparent ${parentSha}\n\nbridge commit`;
-}
-
-describe("real GitHub adapter", () => {
+describe("Git and GitHub adapters", () => {
   it("rejects a changed worktree Git metadata pointer before collecting changes", async () => {
     mocks.assertWorktreeIdentity.mockRejectedValue(
       new Error("Worktree Git metadata pointer changed after preparation"),
@@ -900,334 +812,6 @@ describe("real GitHub adapter", () => {
       isDraft: true,
     });
     expect(listReads).toBe(2);
-  });
-
-  it("does not start a duplicate run when a finished run lacks a persisted outcome", async () => {
-    sdkMocks.getRun.mockResolvedValue({
-      id: "run",
-      agentId: "agent",
-      status: "finished",
-      requestId: "request",
-      result: "Implementation finished without submitting the outcome tool.",
-      usage: { inputTokens: 10, outputTokens: 20 },
-    });
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
-    const attempt = {
-      ...publishingAttempt(),
-      status: "IMPLEMENTING" as const,
-      cursorAgentId: "agent",
-      cursorRunId: "run",
-    };
-
-    const outcome = await adapter.runImplementer({
-      worktree: "/worktree",
-      baseSha: "b".repeat(40),
-      pushBranch: "branch",
-      localBranch: "branch",
-    }, task({ mode: "new_draft" }), attempt);
-
-    expect(outcome).toMatchObject({
-      status: "needs_input",
-      agentId: "agent",
-      runId: "run",
-      requestId: "request",
-      inputTokens: 10,
-      outputTokens: 20,
-    });
-    expect(outcome.summary).toMatch(/finished without submitting/i);
-    expect(sdkMocks.create).not.toHaveBeenCalled();
-    expect(sdkMocks.resume).not.toHaveBeenCalled();
-  });
-
-  it("stops a lingering run and restores its already persisted structured outcome", async () => {
-    sdkMocks.getRun
-      .mockResolvedValueOnce({
-        id: "run",
-        agentId: "agent",
-        status: "running",
-      })
-      .mockResolvedValueOnce({
-        id: "run",
-        agentId: "agent",
-        status: "cancelled",
-        requestId: "request",
-        usage: { inputTokens: 10, outputTokens: 20 },
-      });
-    sdkMocks.cancelRun.mockResolvedValue(undefined);
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
-    const attempt = {
-      ...publishingAttempt(),
-      status: "IMPLEMENTING" as const,
-      cursorAgentId: "agent",
-      cursorRunId: "run",
-      outcome: "completed" as const,
-      outcomeSummary: "Persisted final outcome",
-    };
-
-    const outcome = await adapter.runImplementer({
-      worktree: "/worktree",
-      baseSha: "b".repeat(40),
-      pushBranch: "branch",
-      localBranch: "branch",
-    }, task({ mode: "new_draft" }), attempt);
-
-    expect(outcome).toMatchObject({
-      status: "completed",
-      summary: "Persisted final outcome",
-      agentId: "agent",
-      runId: "run",
-      requestId: "request",
-      inputTokens: 10,
-      outputTokens: 20,
-    });
-    expect(sdkMocks.cancelRun).toHaveBeenCalledOnce();
-    expect(sdkMocks.resume).not.toHaveBeenCalled();
-    expect(sdkMocks.create).not.toHaveBeenCalled();
-  });
-
-  it("reconciles an ambiguous durable-outcome cancellation after terminal readback", async () => {
-    sdkMocks.getRun
-      .mockResolvedValueOnce({
-        id: "run",
-        agentId: "agent",
-        status: "running",
-      })
-      .mockResolvedValueOnce({
-        id: "run",
-        agentId: "agent",
-        status: "finished",
-        result: "done",
-      });
-    sdkMocks.cancelRun.mockRejectedValue(new Error("connection closed after cancellation"));
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
-    const attempt = {
-      ...publishingAttempt(),
-      status: "IMPLEMENTING" as const,
-      cursorAgentId: "agent",
-      cursorRunId: "run",
-      outcome: "completed" as const,
-      outcomeSummary: "Persisted final outcome",
-    };
-
-    await expect(adapter.runImplementer({
-      worktree: "/worktree",
-      baseSha: "b".repeat(40),
-      pushBranch: "branch",
-      localBranch: "branch",
-    }, task({ mode: "new_draft" }), attempt)).resolves.toMatchObject({
-      status: "completed",
-      summary: "Persisted final outcome",
-    });
-    expect(sdkMocks.getRun).toHaveBeenCalledTimes(2);
-    expect(sdkMocks.resume).not.toHaveBeenCalled();
-  });
-
-  it("restores a terminal Cursor error instead of starting a follow-up run", async () => {
-    sdkMocks.getRun.mockResolvedValue({
-      id: "run",
-      agentId: "agent",
-      status: "error",
-      error: { message: "Cursor model failed" },
-    });
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
-    const attempt = {
-      ...publishingAttempt(),
-      status: "IMPLEMENTING" as const,
-      cursorAgentId: "agent",
-      cursorRunId: "run",
-    };
-
-    await expect(adapter.runImplementer({
-      worktree: "/worktree",
-      baseSha: "b".repeat(40),
-      pushBranch: "branch",
-      localBranch: "branch",
-    }, task({ mode: "new_draft" }), attempt)).rejects.toThrow(/model failed/i);
-    expect(sdkMocks.create).not.toHaveBeenCalled();
-    expect(sdkMocks.resume).not.toHaveBeenCalled();
-  });
-
-  it("fails closed when the prior run cannot be read instead of forcing a duplicate", async () => {
-    sdkMocks.getRun.mockRejectedValue(new Error("local run store is temporarily unavailable"));
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
-    const attempt = {
-      ...publishingAttempt(),
-      status: "IMPLEMENTING" as const,
-      cursorAgentId: "agent",
-      cursorRunId: "run",
-    };
-
-    await expect(adapter.runImplementer({
-      worktree: "/worktree",
-      baseSha: "b".repeat(40),
-      pushBranch: "branch",
-      localBranch: "branch",
-    }, task({ mode: "new_draft" }), attempt)).rejects.toThrow(/safely recover/i);
-
-    expect(sdkMocks.resume).not.toHaveBeenCalled();
-    expect(sdkMocks.create).not.toHaveBeenCalled();
-  });
-
-  it("creates diagnostic logs with owner-only permissions", async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), "cursor-log-"));
-    const logPath = path.join(directory, "job.log");
-    vi.mocked(store.get).mockReturnValue({ logPath } as Job);
-    sdkMocks.getRun.mockRejectedValue(new Error("local run store is unavailable"));
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
-    const attempt = {
-      ...publishingAttempt(),
-      status: "IMPLEMENTING" as const,
-      cursorAgentId: "agent",
-      cursorRunId: "run",
-    };
-
-    await expect(adapter.runImplementer({
-      worktree: "/worktree",
-      baseSha: "b".repeat(40),
-      pushBranch: "branch",
-      localBranch: "branch",
-    }, task({ mode: "new_draft" }), attempt)).rejects.toThrow(/safely recover/i);
-
-    expect((await stat(logPath)).mode & 0o777).toBe(0o600);
-  });
-
-  it("redacts a structured Cursor outcome before persisting it", async () => {
-    const dispose = vi.fn(async () => undefined);
-    sdkMocks.create.mockImplementation(async (options: {
-      local?: {
-        customTools?: Record<string, { execute: (args: Record<string, string>) => unknown }>;
-        settingSources?: string[];
-        sandboxOptions?: { enabled: boolean };
-      };
-    }) => {
-      expect(options.local).toMatchObject({
-        settingSources: [],
-        sandboxOptions: { enabled: true },
-      });
-      const submit = options.local?.customTools?.submit_bridge_outcome;
-      return {
-        agentId: "agent",
-        send: vi.fn(async () => {
-          submit?.execute({
-            status: "completed",
-            summary: "Implemented with token: abcdefghijklmnopqrstuvwxyz",
-          });
-          return {
-            id: "run",
-            agentId: "agent",
-            status: "running",
-            async *stream(): AsyncGenerator<never, void> { /* No events. */ },
-            wait: vi.fn(async () => ({
-              id: "run",
-              agentId: "agent",
-              status: "finished",
-              result: "done",
-            })),
-          };
-        }),
-        [Symbol.asyncDispose]: dispose,
-      };
-    });
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
-    const attempt = {
-      ...publishingAttempt(),
-      status: "IMPLEMENTING" as const,
-    };
-
-    const outcome = await adapter.runImplementer({
-      worktree: "/worktree",
-      baseSha: "b".repeat(40),
-      pushBranch: "branch",
-      localBranch: "branch",
-    }, task({ mode: "new_draft" }), attempt);
-
-    expect(outcome.summary).not.toContain("abcdefghijklmnopqrstuvwxyz");
-    expect(store.updateAttempt).toHaveBeenCalledWith(
-      attempt.id,
-      attempt.workerToken,
-      expect.objectContaining({ outcomeSummary: "Implemented with token: [REDACTED]" }),
-    );
-    expect(dispose).toHaveBeenCalledOnce();
-  });
-
-  it("includes redacted verifier diagnostics in a failure report", async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), "cursor-report-"));
-    const reportPaths = {
-      ...paths,
-      home: directory,
-      reportsDir: path.join(directory, "reports"),
-    };
-    const adapter = new RealWorkflowAdapter(reportPaths, config, store, "job");
-    const job: Job = {
-      id: "job",
-      repositoryAlias: "demo",
-      taskId: "TASK-DEMO",
-      specVersion: 2,
-      specHash: `sha256:${"a".repeat(64)}`,
-      taskCommitSha: "b".repeat(40),
-      taskBlobSha: "c".repeat(40),
-      targetOrigin: "owner/repo",
-      targetBaseSha: "d".repeat(40),
-      policyVersion: 2,
-      maxAttempts: 2,
-      status: "FAILED",
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    const report = await adapter.writeReport({
-      job,
-      task: task({ mode: "new_draft" }),
-      verification: [{
-        command: "pnpm test",
-        status: "failed",
-        durationMs: 10,
-        output: "failing assertion\napi_key=super-secret-value",
-      }],
-      error: "Verification failed with token: another-secret-value",
-    });
-    const content = await readFile(report, "utf8");
-
-    expect(content).toContain("failing assertion");
-    expect(content).not.toContain("super-secret-value");
-    expect(content).not.toContain("another-secret-value");
-  });
-
-  it("does not confirm cancellation while the persisted Cursor run is still active", async () => {
-    sdkMocks.cancelRun.mockResolvedValue(undefined);
-    sdkMocks.getRun.mockResolvedValue({
-      id: "run",
-      agentId: "agent",
-      status: "running",
-    });
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
-
-    await expect(adapter.cancel({
-      ...publishingAttempt(),
-      status: "IMPLEMENTING",
-      cursorAgentId: "agent",
-      cursorRunId: "run",
-      worktree: "/worktree",
-    })).rejects.toThrow(/still active/i);
-  });
-
-  it("treats an already terminal persisted run as stopped without cancelling it again", async () => {
-    sdkMocks.getRun.mockResolvedValue({
-      id: "run",
-      agentId: "agent",
-      status: "finished",
-    });
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
-
-    await adapter.cancel({
-      ...publishingAttempt(),
-      status: "VERIFYING",
-      cursorAgentId: "agent",
-      cursorRunId: "run",
-      worktree: "/worktree",
-    });
-
-    expect(sdkMocks.cancelRun).not.toHaveBeenCalled();
   });
 
   it("refuses to attest a candidate after the implementer changes HEAD", async () => {
