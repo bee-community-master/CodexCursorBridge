@@ -29,6 +29,7 @@ limits:
   max_changed_files: 8
   max_diff_lines: 500
   allow_test_deletion: false
+  max_repair_attempts: 1
 stop_conditions:
   - A forbidden path or production system is required.
 pull_request:

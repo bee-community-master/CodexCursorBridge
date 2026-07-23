@@ -21,4 +21,31 @@ describe("independent change verification", () => {
     expect(result.reasons.join(" ")).toMatch(/forbidden/i);
     expect(result.reasons.join(" ")).toMatch(/deleted test/i);
   });
+
+  it.each([
+    "src/__tests__/service.ts",
+    "test/integration/service.ts",
+    "spec/service_spec.rb",
+    "ios/AppTests/Service.swift",
+    "android/src/main/kotlin/ServiceTest.kt",
+    "dotnet/Product.Tests/Service.cs",
+    "java/src/main/java/TestService.java",
+    "service.test.ts",
+    "ServiceTest.kt",
+    "TestService.java",
+  ])("recognizes test-directory deletion for %s", (deletedTest) => {
+    const result = assessChanges({
+      files: [deletedTest],
+      deletedFiles: [deletedTest],
+      diffLines: 10,
+      allowedPatterns: ["src/**", "test/**", "spec/**"],
+      forbiddenPatterns: [],
+      maxChangedFiles: 3,
+      maxDiffLines: 50,
+      allowTestDeletion: false,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons.join(" ")).toMatch(/deleted test/i);
+  });
 });

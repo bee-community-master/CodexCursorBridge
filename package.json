@@ -1,6 +1,6 @@
 {
   "name": "codex-cursor-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -19,10 +19,11 @@
     "repo:add": "tsx src/cli.ts repo:add",
     "task:approve": "tsx src/cli.ts task:approve",
     "models:list": "tsx src/cli.ts models:list",
+    "stats": "tsx src/cli.ts stats",
     "smoke:mcp": "node dist/smoke-mcp.js",
     "smoke:cursor": "node dist/smoke-cursor-live.js",
     "mcp": "node dist/mcp.js",
-    "worker": "node dist/worker.js"
+    "supervisor": "node dist/supervisor.js"
   },
   "dependencies": {
     "@cursor/sdk": "1.0.23",

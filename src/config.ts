@@ -1,41 +1,58 @@
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import { writeOwnerOnlyAtomic } from "./adapters/owner-only-atomic-file.js";
+import type {
+  MachineConfig,
+  RepositoryConfig,
+  RuntimePaths,
+} from "./domain/configuration.js";
+
+export type {
+  MachineConfig,
+  RepositoryConfig,
+  RuntimePaths,
+} from "./domain/configuration.js";
+
+function hasNoControlCharacters(value: string): boolean {
+  return ![...value].some((character) => {
+    const codePoint = character.codePointAt(0)!;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
+}
 
 const repositorySchema = z.object({
-  root: z.string().min(1),
-  origin: z.string().regex(/^[^/]+\/[^/]+$/),
-  defaultBranch: z.string().min(1),
+  root: z.string().min(1)
+    .refine((value) => path.isAbsolute(value), "repository root must be absolute")
+    .refine(hasNoControlCharacters, "repository root contains control characters"),
+  origin: z.string().regex(/^[^\s/]+\/[^\s/]+$/)
+    .refine(hasNoControlCharacters, "repository origin contains control characters"),
+  defaultBranch: z.string().min(1).regex(/^[^\s]+$/)
+    .refine(hasNoControlCharacters, "default branch contains control characters"),
 });
 
 const machineConfigSchema = z.object({
-  cursorModelId: z.string().min(1),
+  cursorModelId: z.string().min(1)
+    .refine(hasNoControlCharacters, "Cursor model id contains control characters"),
   repositories: z.record(z.string().regex(/^[a-z0-9][a-z0-9-]*$/), repositorySchema),
 });
 
-export type RepositoryConfig = z.infer<typeof repositorySchema>;
-export type MachineConfig = z.infer<typeof machineConfigSchema>;
-
-export interface RuntimePaths {
-  projectRoot: string;
-  home: string;
-  configFile: string;
-  databaseFile: string;
-  logsDir: string;
-  reportsDir: string;
-  worktreesDir: string;
-  tasksDir: string;
-}
-
 export function runtimePaths(projectRoot = process.env.CURSOR_BRIDGE_ROOT ?? process.cwd()): RuntimePaths {
-  const home = process.env.CURSOR_BRIDGE_HOME ?? path.join(os.homedir(), ".config", "codex-cursor-bridge");
+  const home = path.resolve(
+    process.env.CURSOR_BRIDGE_HOME
+      ?? path.join(os.homedir(), ".config", "codex-cursor-bridge"),
+  );
+  const root = path.resolve(projectRoot);
+  if (!hasNoControlCharacters(root) || !hasNoControlCharacters(home)) {
+    throw new Error("Cursor Bridge runtime roots may not contain control characters");
+  }
   return {
-    projectRoot: path.resolve(projectRoot), home,
+    projectRoot: root, home,
     configFile: path.join(home, "config.json"), databaseFile: path.join(home, "jobs.sqlite"),
     logsDir: path.join(home, "logs"), reportsDir: path.join(home, "reports"),
-    worktreesDir: path.join(os.homedir(), ".codex", "worktrees", "cursor-bridge"),
-    tasksDir: path.join(path.resolve(projectRoot), "tasks"),
+    worktreesDir: path.join(home, "worktrees"),
+    tasksDir: path.join(root, "tasks"),
   };
 }
 
@@ -45,11 +62,10 @@ export async function loadMachineConfig(file: string): Promise<MachineConfig> {
 
 export async function saveMachineConfig(file: string, config: MachineConfig): Promise<void> {
   const parsed = machineConfigSchema.parse(config);
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temporary = `${file}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(parsed, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  await chmod(temporary, 0o600);
-  await rename(temporary, file);
+  const directory = path.dirname(file);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
+  await writeOwnerOnlyAtomic(file, `${JSON.stringify(parsed, null, 2)}\n`);
 }
 
 export function addRepository(config: MachineConfig, alias: string, repository: RepositoryConfig): MachineConfig {
