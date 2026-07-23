@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
-import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { writeOwnerOnlyAtomic } from "./adapters/owner-only-atomic-file.js";
 import { runFile } from "./git.js";
 
 export const SUPERVISOR_LABEL = "com.codex-cursor-bridge.supervisor";
@@ -93,19 +93,7 @@ function launchServiceTarget(): string {
 }
 
 export async function writeSupervisorPlist(file: string, content: string): Promise<void> {
-  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, content, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
-    await chmod(temporary, 0o600);
-    await rename(temporary, file);
-  } catch (error) {
-    await rm(temporary, { force: true });
-    throw error;
-  }
+  await writeOwnerOnlyAtomic(file, content);
 }
 
 export function isMissingLaunchdService(error: unknown): boolean {

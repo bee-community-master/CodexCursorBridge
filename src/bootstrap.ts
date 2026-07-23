@@ -5,7 +5,6 @@ import {
   lstat,
   mkdir,
   readFile,
-  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -22,6 +21,7 @@ import {
 } from "./keychain.js";
 import { installSupervisor, uninstallSupervisor } from "./launchd.js";
 import { removeManagedRegistrationBlocks, upsertManagedMcpBlock } from "./managed-config.js";
+import { writeOwnerOnlyAtomic } from "./adapters/owner-only-atomic-file.js";
 
 const agentMarker = "# Managed by codex-cursor-bridge bootstrap";
 const marketplaceName = "coding-agent";
@@ -77,22 +77,6 @@ async function readOptionalPlainFile(file: string): Promise<string | undefined> 
     return await readFile(file, "utf8");
   } catch (error) {
     if (isNotFound(error)) return undefined;
-    throw error;
-  }
-}
-
-async function writeOwnerOnlyAtomic(file: string, content: string): Promise<void> {
-  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, content, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
-    await chmod(temporary, 0o600);
-    await rename(temporary, file);
-  } catch (error) {
-    await rm(temporary, { force: true });
     throw error;
   }
 }

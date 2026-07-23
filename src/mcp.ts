@@ -96,7 +96,11 @@ server.registerTool("cursor_start_task", {
     let job = store.createOrGet(resolved.createJobInput);
     if (!job.logPath) {
       store.update(job.id, { logPath: path.join(paths.logsDir, `${job.id}.log`) });
-      job = store.get(job.id)!;
+      const updated = store.get(job.id);
+      if (!updated) {
+        throw new Error(`Job disappeared after log initialization: ${job.id}`);
+      }
+      job = updated;
     }
     const wakeWarning = await wakeJobSupervisor(store, job, wakeSupervisor);
     if (wakeWarning) {

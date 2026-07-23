@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { runFile } from "./git.js";
 
-export const keychainService = "codex-cursor-bridge";
-export const keychainAccount = "cursor-api-key";
+const keychainService = "codex-cursor-bridge";
+const keychainAccount = "cursor-api-key";
 const securityCommand = "/usr/bin/security";
 
 interface KeychainStoreRequest {

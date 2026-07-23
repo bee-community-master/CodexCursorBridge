@@ -27,7 +27,7 @@ import type {
 import type { Attempt } from "./domain/job.js";
 import type { ApprovedTask } from "./domain/task.js";
 
-export interface RealWorkflowAdapterServices {
+interface RealWorkflowAdapterServices {
   worktrees: {
     prepare(
       job: { id: string },
@@ -60,7 +60,7 @@ export interface RealWorkflowAdapterServices {
   artifacts: Pick<WorkflowAdapter, "writeAttestation" | "writeReport">;
 }
 
-export function createRealWorkflowAdapterServices(
+function createRealWorkflowAdapterServices(
   paths: RuntimePaths,
   config: MachineConfig,
   store: PublicationStatePort,

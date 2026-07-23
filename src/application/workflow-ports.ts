@@ -119,7 +119,7 @@ export interface WorkflowAdapter {
   cancel(attempt: Attempt): Promise<void>;
 }
 
-export interface JobStateReader {
+interface JobStateReader {
   get(id: string): Job | undefined;
   getAttempt(id: string): Attempt | undefined;
 }

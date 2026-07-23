@@ -1,12 +1,13 @@
 import { mkdir, rm, symlink } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
-import type { Job, JobStore } from "../src/state.js";
+import type { Attempt, Job, JobStore } from "../src/state.js";
 import {
   approvedTask as task,
   config,
   durableEffect,
   paths,
+  preparedWorktree,
   publicationInput,
   publishingAttempt,
   rawCommit,
@@ -62,6 +63,27 @@ const store = {
   updateAttempt: vi.fn(),
 } as unknown as JobStore;
 
+function useActivePublishingAttempt(
+  attempt: Attempt = publishingAttempt(),
+): Attempt {
+  vi.mocked(store.get).mockReturnValue({
+    currentAttemptId: attempt.id,
+  } as Job);
+  vi.mocked(store.getAttempt).mockReturnValue(attempt);
+  return attempt;
+}
+
+function enableDurableEffects(): void {
+  vi.mocked(store.beginEffect).mockImplementation(
+    (_jobId, _attemptId, kind, key) => durableEffect(kind, key),
+  );
+  vi.mocked(store.completeEffect).mockImplementation((_effectId, payload) => ({
+    ...durableEffect("completed", "completed"),
+    status: "COMPLETED",
+    payload,
+  }));
+}
+
 beforeEach(async () => {
   mocks.git.mockReset();
   mocks.assertGitHubRemote.mockReset().mockImplementation(async (root: string) => {
@@ -94,7 +116,7 @@ afterEach(async () => {
   await rm(paths.worktreesDir, { recursive: true, force: true });
 });
 
-describe("Git and GitHub adapters", () => {
+describe("RealWorkflowAdapter Git preparation and publication", () => {
   it("rejects a changed worktree Git metadata pointer before collecting changes", async () => {
     mocks.assertWorktreeIdentity.mockRejectedValue(
       new Error("Worktree Git metadata pointer changed after preparation"),
@@ -409,15 +431,8 @@ describe("Git and GitHub adapters", () => {
     const candidateTree = "e".repeat(40);
     const candidateHead = "d".repeat(40);
     const unexpectedRemote = "f".repeat(40);
-    vi.mocked(store.get).mockReturnValue({ currentAttemptId: "attempt" } as never);
-    vi.mocked(store.getAttempt).mockReturnValue(publishingAttempt());
-    vi.mocked(store.beginEffect).mockImplementation((_jobId, _attemptId, kind, key) =>
-      durableEffect(kind, key));
-    vi.mocked(store.completeEffect).mockImplementation((_effectId, payload) => ({
-      ...durableEffect("completed", "completed"),
-      status: "COMPLETED",
-      payload,
-    }));
+    useActivePublishingAttempt();
+    enableDurableEffects();
     mocks.git.mockImplementation(async (_cwd: string, ...args: string[]) => {
       if (args[0] === "remote") return "git@github.com:owner/repo.git";
       if (args[0] === "rev-parse" && args[1] === "HEAD^{tree}") return candidateTree;
@@ -430,23 +445,14 @@ describe("Git and GitHub adapters", () => {
     });
     const adapter = new RealWorkflowAdapter(paths, config, store, "job");
 
-    await expect(adapter.publish({
-      worktree: "/worktree",
-      baseSha: approved.target.base_sha,
-      pushBranch: "feature/existing",
-      localBranch: "codex/cursor/task-demo-followup-job",
-    }, approved, repository, {
-      tree: {
-        treeHash: candidateTree,
-        patchHash: `sha256:${"a".repeat(64)}`,
-      },
-      initialChanges: { files: ["src/demo.ts"], deletedFiles: [], diffLines: 1 },
-      finalChanges: { files: ["src/demo.ts"], deletedFiles: [], diffLines: 1 },
-      assessment: { ok: true, reasons: [], allowed: ["src/demo.ts"], forbidden: [], outOfScope: [] },
-      verification: [{ command: "pnpm test", status: "passed", durationMs: 1 }],
-      attempts: [publishingAttempt()],
-      cursorSummary: "done",
-    }, publishingAttempt())).rejects.toThrow(/head changed|remote/i);
+    await expect(adapter.publish(
+      preparedWorktree({ baseSha: approved.target.base_sha }),
+      approved,
+      repository,
+      publicationInput(candidateTree),
+      publishingAttempt(),
+    ))
+      .rejects.toThrow(/head changed|remote/i);
     expect(mocks.git.mock.calls.some(([, ...args]) => args.includes("push"))).toBe(false);
   });
 
@@ -456,15 +462,8 @@ describe("Git and GitHub adapters", () => {
     const candidateHead = "d".repeat(40);
     let remoteReads = 0;
     let treeReads = 0;
-    vi.mocked(store.get).mockReturnValue({ currentAttemptId: "attempt" } as never);
-    vi.mocked(store.getAttempt).mockReturnValue(publishingAttempt());
-    vi.mocked(store.beginEffect).mockImplementation((_jobId, _attemptId, kind, key) =>
-      durableEffect(kind, key));
-    vi.mocked(store.completeEffect).mockImplementation((_effectId, payload) => ({
-      ...durableEffect("completed", "completed"),
-      status: "COMPLETED",
-      payload,
-    }));
+    useActivePublishingAttempt();
+    enableDurableEffects();
     mocks.git.mockImplementation(async (_cwd: string, ...args: string[]) => {
       if (args[0] === "remote") return "git@github.com:owner/repo.git";
       if (args[0] === "rev-parse" && args[1] === "HEAD^{tree}") {
@@ -497,23 +496,13 @@ describe("Git and GitHub adapters", () => {
     });
     const adapter = new RealWorkflowAdapter(paths, config, store, "job");
 
-    await adapter.publish({
-      worktree: "/worktree",
-      baseSha: approved.target.base_sha,
-      pushBranch: "feature/existing",
-      localBranch: "codex/cursor/task-demo-followup-job",
-    }, approved, repository, {
-      tree: {
-        treeHash: candidateTree,
-        patchHash: `sha256:${"a".repeat(64)}`,
-      },
-      initialChanges: { files: ["src/demo.ts"], deletedFiles: [], diffLines: 1 },
-      finalChanges: { files: ["src/demo.ts"], deletedFiles: [], diffLines: 1 },
-      assessment: { ok: true, reasons: [], allowed: ["src/demo.ts"], forbidden: [], outOfScope: [] },
-      verification: [{ command: "pnpm test", status: "passed", durationMs: 1 }],
-      attempts: [publishingAttempt()],
-      cursorSummary: "done",
-    }, publishingAttempt());
+    await adapter.publish(
+      preparedWorktree({ baseSha: approved.target.base_sha }),
+      approved,
+      repository,
+      publicationInput(candidateTree),
+      publishingAttempt(),
+    );
 
     expect(mocks.git).toHaveBeenCalledWith(
       "/worktree",
@@ -566,8 +555,7 @@ describe("Git and GitHub adapters", () => {
     const unrelatedParent = "f".repeat(40);
     const attempt = publishingAttempt();
     let remoteReads = 0;
-    vi.mocked(store.get).mockReturnValue({ currentAttemptId: attempt.id } as never);
-    vi.mocked(store.getAttempt).mockReturnValue(attempt);
+    useActivePublishingAttempt(attempt);
     vi.mocked(store.beginEffect).mockImplementation((_jobId, _attemptId, kind, key) =>
       durableEffect(kind, key));
     mocks.git.mockImplementation(async (_cwd: string, ...args: string[]) => {
@@ -598,12 +586,13 @@ describe("Git and GitHub adapters", () => {
     });
     const adapter = new RealWorkflowAdapter(paths, config, store, "job");
 
-    await expect(adapter.publish({
-      worktree: "/worktree",
-      baseSha: approved.target.base_sha,
-      pushBranch: "feature/existing",
-      localBranch: "codex/cursor/task-demo-followup-job",
-    }, approved, repository, publicationInput(candidateTree), attempt))
+    await expect(adapter.publish(
+      preparedWorktree({ baseSha: approved.target.base_sha }),
+      approved,
+      repository,
+      publicationInput(candidateTree),
+      attempt,
+    ))
       .rejects.toThrow(/direct child|parent/i);
 
     expect(mocks.git.mock.calls.some(([, ...args]) => args.includes("push"))).toBe(false);
@@ -612,7 +601,9 @@ describe("Git and GitHub adapters", () => {
   it("does not let a reclaimed worker continue publication with the replacement lease", async () => {
     const approved = task({ mode: "existing_pr", number: 7 });
     const attempt = publishingAttempt();
-    vi.mocked(store.get).mockReturnValue({ currentAttemptId: attempt.id } as never);
+    vi.mocked(store.get).mockReturnValue({
+      currentAttemptId: attempt.id,
+    } as Job);
     vi.mocked(store.getAttempt).mockReturnValue({
       ...attempt,
       workerToken: "replacement-worker",
@@ -622,12 +613,13 @@ describe("Git and GitHub adapters", () => {
     });
     const adapter = new RealWorkflowAdapter(paths, config, store, "job");
 
-    await expect(adapter.publish({
-      worktree: "/worktree",
-      baseSha: approved.target.base_sha,
-      pushBranch: "feature/existing",
-      localBranch: "codex/cursor/task-demo-followup-job",
-    }, approved, repository, publicationInput(), attempt)).rejects.toThrow(/lease/i);
+    await expect(adapter.publish(
+      preparedWorktree({ baseSha: approved.target.base_sha }),
+      approved,
+      repository,
+      publicationInput(),
+      attempt,
+    )).rejects.toThrow(/lease/i);
 
     expect(mocks.git).not.toHaveBeenCalled();
   });
@@ -637,15 +629,8 @@ describe("Git and GitHub adapters", () => {
     const attempt = publishingAttempt();
     const candidateHead = "d".repeat(40);
     let remoteReads = 0;
-    vi.mocked(store.get).mockReturnValue({ currentAttemptId: attempt.id } as never);
-    vi.mocked(store.getAttempt).mockReturnValue(attempt);
-    vi.mocked(store.beginEffect).mockImplementation((_jobId, _attemptId, kind, key) =>
-      durableEffect(kind, key));
-    vi.mocked(store.completeEffect).mockImplementation((_effectId, payload) => ({
-      ...durableEffect("completed", "completed"),
-      status: "COMPLETED",
-      payload,
-    }));
+    useActivePublishingAttempt(attempt);
+    enableDurableEffects();
     mocks.git.mockImplementation(async (_cwd: string, ...args: string[]) => {
       if (args[0] === "remote") return "git@github.com:owner/repo.git";
       if (args[0] === "rev-parse" && args[1] === "HEAD^{tree}") return "e".repeat(40);
@@ -674,12 +659,13 @@ describe("Git and GitHub adapters", () => {
     });
     const adapter = new RealWorkflowAdapter(paths, config, store, "job");
 
-    await expect(adapter.publish({
-      worktree: "/worktree",
-      baseSha: approved.target.base_sha,
-      pushBranch: "feature/existing",
-      localBranch: "codex/cursor/task-demo-followup-job",
-    }, approved, repository, publicationInput(), attempt)).rejects.toThrow(/head branch/i);
+    await expect(adapter.publish(
+      preparedWorktree({ baseSha: approved.target.base_sha }),
+      approved,
+      repository,
+      publicationInput(),
+      attempt,
+    )).rejects.toThrow(/head branch/i);
   });
 
   it("rejects a final PR readback that is no longer open", async () => {
@@ -687,15 +673,8 @@ describe("Git and GitHub adapters", () => {
     const attempt = publishingAttempt();
     const candidateHead = "d".repeat(40);
     let remoteReads = 0;
-    vi.mocked(store.get).mockReturnValue({ currentAttemptId: attempt.id } as never);
-    vi.mocked(store.getAttempt).mockReturnValue(attempt);
-    vi.mocked(store.beginEffect).mockImplementation((_jobId, _attemptId, kind, key) =>
-      durableEffect(kind, key));
-    vi.mocked(store.completeEffect).mockImplementation((_effectId, payload) => ({
-      ...durableEffect("completed", "completed"),
-      status: "COMPLETED",
-      payload,
-    }));
+    useActivePublishingAttempt(attempt);
+    enableDurableEffects();
     mocks.git.mockImplementation(async (_cwd: string, ...args: string[]) => {
       if (args[0] === "remote") return "git@github.com:owner/repo.git";
       if (args[0] === "rev-parse" && args[1] === "HEAD^{tree}") return "e".repeat(40);
@@ -733,12 +712,17 @@ describe("Git and GitHub adapters", () => {
     });
     const adapter = new RealWorkflowAdapter(paths, config, store, "job");
 
-    await expect(adapter.publish({
-      worktree: "/worktree",
-      baseSha: approved.target.base_sha,
-      pushBranch: "codex/cursor/task-demo",
-      localBranch: "codex/cursor/task-demo",
-    }, approved, repository, publicationInput(), attempt)).rejects.toThrow(/open/i);
+    await expect(adapter.publish(
+      preparedWorktree({
+        baseSha: approved.target.base_sha,
+        pushBranch: "codex/cursor/task-demo",
+        localBranch: "codex/cursor/task-demo",
+      }),
+      approved,
+      repository,
+      publicationInput(),
+      attempt,
+    )).rejects.toThrow(/open/i);
   });
 
   it("reconciles an ambiguous push error when remote readback has the candidate", async () => {
@@ -746,15 +730,8 @@ describe("Git and GitHub adapters", () => {
     const attempt = publishingAttempt();
     const candidateHead = "d".repeat(40);
     let remoteReads = 0;
-    vi.mocked(store.get).mockReturnValue({ currentAttemptId: attempt.id } as never);
-    vi.mocked(store.getAttempt).mockReturnValue(attempt);
-    vi.mocked(store.beginEffect).mockImplementation((_jobId, _attemptId, kind, key) =>
-      durableEffect(kind, key));
-    vi.mocked(store.completeEffect).mockImplementation((_effectId, payload) => ({
-      ...durableEffect("completed", "completed"),
-      status: "COMPLETED",
-      payload,
-    }));
+    useActivePublishingAttempt(attempt);
+    enableDurableEffects();
     mocks.git.mockImplementation(async (_cwd: string, ...args: string[]) => {
       if (args[0] === "remote") return "git@github.com:owner/repo.git";
       if (args[0] === "rev-parse" && args[1] === "HEAD^{tree}") return "e".repeat(40);
@@ -784,12 +761,13 @@ describe("Git and GitHub adapters", () => {
     });
     const adapter = new RealWorkflowAdapter(paths, config, store, "job");
 
-    await expect(adapter.publish({
-      worktree: "/worktree",
-      baseSha: approved.target.base_sha,
-      pushBranch: "feature/existing",
-      localBranch: "codex/cursor/task-demo-followup-job",
-    }, approved, repository, publicationInput(), attempt)).resolves.toMatchObject({
+    await expect(adapter.publish(
+      preparedWorktree({ baseSha: approved.target.base_sha }),
+      approved,
+      repository,
+      publicationInput(),
+      attempt,
+    )).resolves.toMatchObject({
       headSha: candidateHead,
       remoteHeadSha: candidateHead,
     });
@@ -802,15 +780,8 @@ describe("Git and GitHub adapters", () => {
     const prUrl = "https://github.com/owner/repo/pull/9";
     let remoteReads = 0;
     let listReads = 0;
-    vi.mocked(store.get).mockReturnValue({ currentAttemptId: attempt.id } as never);
-    vi.mocked(store.getAttempt).mockReturnValue(attempt);
-    vi.mocked(store.beginEffect).mockImplementation((_jobId, _attemptId, kind, key) =>
-      durableEffect(kind, key));
-    vi.mocked(store.completeEffect).mockImplementation((_effectId, payload) => ({
-      ...durableEffect("completed", "completed"),
-      status: "COMPLETED",
-      payload,
-    }));
+    useActivePublishingAttempt(attempt);
+    enableDurableEffects();
     mocks.git.mockImplementation(async (_cwd: string, ...args: string[]) => {
       if (args[0] === "remote") return "git@github.com:owner/repo.git";
       if (args[0] === "rev-parse" && args[1] === "HEAD^{tree}") return "e".repeat(40);
@@ -850,12 +821,17 @@ describe("Git and GitHub adapters", () => {
     });
     const adapter = new RealWorkflowAdapter(paths, config, store, "job");
 
-    await expect(adapter.publish({
-      worktree: "/worktree",
-      baseSha: approved.target.base_sha,
-      pushBranch: "codex/cursor/task-demo",
-      localBranch: "codex/cursor/task-demo",
-    }, approved, repository, publicationInput(), attempt)).resolves.toMatchObject({
+    await expect(adapter.publish(
+      preparedWorktree({
+        baseSha: approved.target.base_sha,
+        pushBranch: "codex/cursor/task-demo",
+        localBranch: "codex/cursor/task-demo",
+      }),
+      approved,
+      repository,
+      publicationInput(),
+      attempt,
+    )).resolves.toMatchObject({
       prUrl,
       isDraft: true,
     });

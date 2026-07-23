@@ -39,9 +39,10 @@ MCP SDK, 프로세스 실행기 같은 outbound adapter를 import하지 않는�
 - `src/application/workflow-ports.ts`는 workflow가 요구하는 저장소 및 외부 실행
   포트를 소유한다. SQLite나 SDK 타입은 이 계약에 노출하지 않는다.
 - `src/application/workflow.ts`는 기존 import 경로를 보존하는 facade다.
-  `workflow-execution.ts`가 승인 작업의 준비, 구현, 범위 점검, 독립 검증, 제한된
-  repair, 게시 및 cleanup 단계를 조율하고 `workflow-failure-handler.ts`가 실패,
-  취소 확인, 지연된 전달 완료와 진단 보고를 별도로 처리한다.
+  `workflow-execution.ts`가 승인 작업의 준비, 구현, 제한된 repair, 게시 및 cleanup
+  단계를 조율한다. `workflow-review-policy.ts`는 범위 평가, 검증 실패 선택과 repair
+  피드백 생성을 맡고, `workflow-failure-handler.ts`는 실패, 취소 확인, 지연된 전달
+  완료와 진단 보고를 별도로 처리한다.
 - `src/state.ts`의 `JobStore`는 SQLite adapter facade다. 원자성이 필요한 Job/Attempt
   전이는 facade에 남기고, 스키마, 레코드 매핑, effect/event 원장과 전달 lifecycle은
   집중된 협력자에게 위임한다.

@@ -17,6 +17,11 @@ type ActiveAttemptAssertion = (
   expectedStatus: AttemptStatus,
 ) => Attempt;
 
+interface CurrentAttemptLease {
+  attempt: Attempt;
+  job: Job;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -75,11 +80,39 @@ export class SqliteDeliveryLifecycle {
       this.#database.exec("ROLLBACK");
       throw error;
     }
-    return this.#records.get(jobId)!;
+    return this.#requireJob(jobId);
   }
 
   isCancellationRequested(jobId: string): boolean {
     return this.#records.get(jobId)?.status === "CANCEL_REQUESTED";
+  }
+
+  #requireJob(jobId: string): Job {
+    const job = this.#records.get(jobId);
+    if (!job) {
+      throw new Error(`Job disappeared from state storage: ${jobId}`);
+    }
+    return job;
+  }
+
+  #currentAttemptLease(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    operation: string,
+  ): CurrentAttemptLease {
+    const attempt = this.#records.getAttempt(attemptId);
+    const job = this.#records.get(jobId);
+    if (
+      !attempt
+      || !job
+      || attempt.jobId !== jobId
+      || attempt.workerToken !== workerToken
+      || job.currentAttemptId !== attemptId
+    ) {
+      throw new Error(`${operation} does not own the active attempt lease`);
+    }
+    return { attempt, job };
   }
 
   confirmCancellation(
@@ -90,16 +123,12 @@ export class SqliteDeliveryLifecycle {
     const timestamp = nowIso();
     this.#database.exec("BEGIN IMMEDIATE");
     try {
-      const attempt = this.#records.getAttempt(attemptId);
-      const job = this.#records.get(jobId);
-      if (
-        !attempt
-        || attempt.jobId !== jobId
-        || attempt.workerToken !== workerToken
-        || job?.currentAttemptId !== attemptId
-      ) {
-        throw new Error("Cancellation confirmation does not own the active attempt lease");
-      }
+      const { job } = this.#currentAttemptLease(
+        jobId,
+        attemptId,
+        workerToken,
+        "Cancellation confirmation",
+      );
       if (job.status !== "CANCEL_REQUESTED") throw new Error("Job has no pending cancellation");
       const attemptResult = this.#database.prepare(`
         UPDATE attempts SET status = 'CANCELLED', updated_at = ?
@@ -124,7 +153,7 @@ export class SqliteDeliveryLifecycle {
         timestamp,
       );
       this.#database.exec("COMMIT");
-      return this.#records.get(jobId)!;
+      return this.#requireJob(jobId);
     } catch (error) {
       this.#database.exec("ROLLBACK");
       throw error;
@@ -170,7 +199,7 @@ export class SqliteDeliveryLifecycle {
         treeHash: publication.treeHash,
       }, timestamp);
       this.#database.exec("COMMIT");
-      return this.#records.get(jobId)!;
+      return this.#requireJob(jobId);
     } catch (error) {
       this.#database.exec("ROLLBACK");
       throw error;
@@ -186,16 +215,12 @@ export class SqliteDeliveryLifecycle {
     const timestamp = nowIso();
     this.#database.exec("BEGIN IMMEDIATE");
     try {
-      const attempt = this.#records.getAttempt(attemptId);
-      const job = this.#records.get(jobId);
-      if (
-        !attempt
-        || attempt.jobId !== jobId
-        || attempt.workerToken !== workerToken
-        || job?.currentAttemptId !== attemptId
-      ) {
-        throw new Error("Delivery completion does not own the active attempt lease");
-      }
+      const { attempt, job } = this.#currentAttemptLease(
+        jobId,
+        attemptId,
+        workerToken,
+        "Delivery completion",
+      );
       if (job.status === "CANCEL_REQUESTED") {
         throw new Error(`Job cancellation is pending: ${job.id}`);
       }
@@ -252,7 +277,7 @@ export class SqliteDeliveryLifecycle {
         to: "DELIVERED_REVIEW_REQUIRED",
       }, timestamp);
       this.#database.exec("COMMIT");
-      return this.#records.get(jobId)!;
+      return this.#requireJob(jobId);
     } catch (error) {
       this.#database.exec("ROLLBACK");
       throw error;

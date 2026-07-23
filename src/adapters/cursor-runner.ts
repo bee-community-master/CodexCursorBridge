@@ -209,7 +209,7 @@ export class CursorImplementer {
         cursorRunId: run.id,
         ...(run.requestId ? { cursorRequestId: run.requestId } : {}),
       });
-      return await this.#waitForOutcome(run, agent, attempt, () => submitted);
+      return await this.#waitForOutcome(run, agent, () => submitted);
     } finally {
       this.#activeRuns.delete(attempt.id);
       await agent[Symbol.asyncDispose]();
@@ -338,7 +338,6 @@ export class CursorImplementer {
   async #waitForOutcome(
     run: Run,
     agent: SDKAgent,
-    attempt: Attempt,
     submitted: () => z.infer<typeof outcomeSchema> | undefined,
   ): Promise<ImplementerOutcome> {
     let cancellationCheckActive = false;

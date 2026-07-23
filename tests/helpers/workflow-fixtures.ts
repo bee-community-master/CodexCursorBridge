@@ -1,6 +1,9 @@
 import os from "node:os";
 import path from "node:path";
-import type { PublicationInput } from "../../src/application/workflow-ports.js";
+import type {
+  PreparedWorktree,
+  PublicationInput,
+} from "../../src/application/workflow-ports.js";
 import type {
   MachineConfig,
   RepositoryConfig,
@@ -110,6 +113,18 @@ export function publishingAttempt(): Attempt {
     heartbeatAt: fixedNow,
     createdAt: fixedNow,
     updatedAt: fixedNow,
+  };
+}
+
+export function preparedWorktree(
+  overrides: Partial<PreparedWorktree> = {},
+): PreparedWorktree {
+  return {
+    worktree: "/worktree",
+    baseSha: "b".repeat(40),
+    pushBranch: "feature/existing",
+    localBranch: "codex/cursor/task-demo-followup-job",
+    ...overrides,
   };
 }
 

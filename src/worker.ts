@@ -150,31 +150,26 @@ async function handleTaskLoadFailure(
   error: unknown,
 ): Promise<void> {
   const message = safeErrorMessage(error);
-  const current = readCurrentClaimState(store, claim.job.id);
-  if (claimLeaseWasReplaced(current.attempt, claim.attempt.workerToken)) return;
-  if (current.job?.status === "CANCEL_REQUESTED") {
-    await confirmPendingCancellation(
-      store,
-      adapter,
-      claim.job.id,
-      claim.attempt.workerToken,
-    );
-  } else if (
-    current.job
-    && !terminalJobStatuses.has(current.job.status)
-  ) {
-    store.failStaleSpec(
-      claim.job.id,
-      claim.attempt.id,
-      claim.attempt.workerToken,
-      message,
-    );
-  }
-  await tryWritePreflightReport(
-    reportsDir,
+  await settleClaimFailure(
     store,
-    claim.job.id,
+    claim,
+    adapter,
+    reportsDir,
     message,
+    (current) => {
+      if (
+        current.job
+        && !terminalJobStatuses.has(current.job.status)
+      ) {
+        store.failStaleSpec(
+          claim.job.id,
+          claim.attempt.id,
+          claim.attempt.workerToken,
+          message,
+        );
+      }
+      return true;
+    },
   );
 }
 
@@ -216,14 +211,14 @@ function markUnexpectedWorkerFailure(
   }
 }
 
-async function handleWorkerFailure(
+async function settleClaimFailure(
   store: WorkerStatePort,
   claim: ClaimedWork,
   adapter: WorkflowAdapter | undefined,
   reportsDir: string,
-  error: unknown,
+  message: string,
+  markFailure: (current: CurrentClaimState) => boolean,
 ): Promise<void> {
-  const message = safeErrorMessage(error);
   const current = readCurrentClaimState(store, claim.job.id);
   if (claimLeaseWasReplaced(current.attempt, claim.attempt.workerToken)) return;
   if (current.job?.status === "CANCEL_REQUESTED") {
@@ -233,14 +228,7 @@ async function handleWorkerFailure(
       claim.job.id,
       claim.attempt.workerToken,
     );
-  } else if (
-    !markUnexpectedWorkerFailure(
-      store,
-      current,
-      claim.job.id,
-      message,
-    )
-  ) {
+  } else if (!markFailure(current)) {
     return;
   }
   await tryWritePreflightReport(
@@ -248,6 +236,29 @@ async function handleWorkerFailure(
     store,
     claim.job.id,
     message,
+  );
+}
+
+async function handleWorkerFailure(
+  store: WorkerStatePort,
+  claim: ClaimedWork,
+  adapter: WorkflowAdapter | undefined,
+  reportsDir: string,
+  error: unknown,
+): Promise<void> {
+  const message = safeErrorMessage(error);
+  await settleClaimFailure(
+    store,
+    claim,
+    adapter,
+    reportsDir,
+    message,
+    (current) => markUnexpectedWorkerFailure(
+      store,
+      current,
+      claim.job.id,
+      message,
+    ),
   );
 }
 

@@ -5,7 +5,7 @@ import type {
   Job,
 } from "../domain/job.js";
 import type { ApprovedTask } from "../domain/task.js";
-import { assessChanges, type ChangeAssessment } from "./change-assessment.js";
+import type { ChangeAssessment } from "./change-assessment.js";
 import { safeErrorMessage } from "./redaction.js";
 import { handleWorkflowFailure } from "./workflow-failure-handler.js";
 import type {
@@ -20,6 +20,13 @@ import type {
   WorkflowReportData,
   WorkflowStatePort,
 } from "./workflow-ports.js";
+import {
+  assessCandidateChanges,
+  candidateChangePresenceFailure,
+  candidateTreeStabilityFailure,
+  firstVerificationFailure,
+  repairFeedbackFor,
+} from "./workflow-review-policy.js";
 
 const leaseMs = 60_000;
 
@@ -27,6 +34,8 @@ type CandidateReview =
   | { kind: "stopped" }
   | { kind: "verified" }
   | { kind: "failed"; failure: VerificationResult };
+
+type ScopeViolationStage = "before_verification" | "after_verification";
 
 type ExecutionReport = Omit<
   WorkflowReportData,
@@ -42,36 +51,6 @@ interface ReviewedCandidate {
 
 interface VerifiedCandidate extends ReviewedCandidate {
   tree: CandidateTree;
-}
-
-function assessmentFor(
-  task: ApprovedTask,
-  changes: CollectedChanges,
-): ChangeAssessment {
-  return assessChanges({
-    files: changes.files,
-    deletedFiles: changes.deletedFiles,
-    diffLines: changes.diffLines,
-    allowedPatterns: task.allowed_paths,
-    forbiddenPatterns: task.forbidden_paths,
-    maxChangedFiles: task.limits.max_changed_files,
-    maxDiffLines: task.limits.max_diff_lines,
-    allowTestDeletion: task.limits.allow_test_deletion,
-  });
-}
-
-function verificationFailure(
-  results: readonly VerificationResult[],
-): VerificationResult | undefined {
-  return results.find((result) => result.status === "failed");
-}
-
-function repairFeedback(failure: VerificationResult): string {
-  return [
-    "Independent verification failed. Repair only the evidenced failure and stay within the approved scope.",
-    `Command: ${failure.command}`,
-    `Output:\n${failure.output ?? "No verifier output was captured."}`,
-  ].join("\n\n");
 }
 
 function implementerOutcomeFields(
@@ -90,35 +69,6 @@ function implementerOutcomeFields(
     ...(outcome.outputTokens === undefined
       ? {}
       : { outputTokens: outcome.outputTokens }),
-  };
-}
-
-function candidateTreeStabilityFailure(
-  before: CandidateTree,
-  after: CandidateTree,
-): VerificationResult {
-  return {
-    command: "candidate-tree-stability",
-    status: "failed",
-    durationMs: 0,
-    output: [
-      "Candidate tree changed during independent verification.",
-      `Before: ${before.treeHash}`,
-      `After: ${after.treeHash}`,
-      "The verification evidence does not cover the candidate that would be published.",
-    ].join("\n"),
-  };
-}
-
-function candidateChangePresenceFailure(): VerificationResult {
-  return {
-    command: "candidate-change-presence",
-    status: "failed",
-    durationMs: 0,
-    output: [
-      "The completed implementation contains no changed files.",
-      "A Draft PR cannot be delivered without a candidate change.",
-    ].join("\n"),
   };
 }
 
@@ -295,7 +245,7 @@ class WorkflowExecution {
         await this.#failVerification(review.failure);
         return false;
       }
-      feedback = repairFeedback(review.failure);
+      feedback = repairFeedbackFor(review.failure);
       this.#attempt = this.#store.beginRepairAttempt(
         this.#jobId,
         this.#attempt.id,
@@ -346,9 +296,15 @@ class WorkflowExecution {
   async #reviewCandidate(): Promise<CandidateReview> {
     const prepared = this.#preparedWorktree();
     this.#initialChanges = await this.#adapter.collectChanges(prepared);
-    this.#assessment = assessmentFor(this.#task, this.#initialChanges);
+    this.#assessment = assessCandidateChanges(
+      this.#task,
+      this.#initialChanges,
+    );
     if (!this.#assessment.ok) {
-      await this.#recordScopeViolation(this.#initialChanges, false);
+      await this.#recordScopeViolation(
+        this.#initialChanges,
+        "before_verification",
+      );
       return { kind: "stopped" };
     }
 
@@ -368,9 +324,15 @@ class WorkflowExecution {
       prepared,
       treeAfterVerification,
     );
-    this.#assessment = assessmentFor(this.#task, this.#finalChanges);
+    this.#assessment = assessCandidateChanges(
+      this.#task,
+      this.#finalChanges,
+    );
     if (!this.#assessment.ok) {
-      await this.#recordScopeViolation(this.#finalChanges, true);
+      await this.#recordScopeViolation(
+        this.#finalChanges,
+        "after_verification",
+      );
       return { kind: "stopped" };
     }
 
@@ -383,7 +345,7 @@ class WorkflowExecution {
     if (this.#finalChanges.files.length === 0) {
       this.#verification.push(candidateChangePresenceFailure());
     }
-    const failure = verificationFailure(this.#verification);
+    const failure = firstVerificationFailure(this.#verification);
     if (failure) return { kind: "failed", failure };
 
     this.#tree = treeAfterVerification;
@@ -392,7 +354,7 @@ class WorkflowExecution {
 
   async #recordScopeViolation(
     changes: CollectedChanges,
-    includeVerificationContext: boolean,
+    stage: ScopeViolationStage,
   ): Promise<void> {
     const assessment = this.#requiredAssessment();
     this.#attempt = this.#store.transitionAttempt(
@@ -405,10 +367,10 @@ class WorkflowExecution {
     await this.#writeExecutionReport({
       changes,
       assessment,
-      ...(includeVerificationContext && this.#initialChanges
+      ...(stage === "after_verification" && this.#initialChanges
         ? { initialChanges: this.#initialChanges }
         : {}),
-      ...(includeVerificationContext && this.#verification
+      ...(stage === "after_verification" && this.#verification
         ? { verification: this.#verification }
         : {}),
       ...(this.#cursorSummary

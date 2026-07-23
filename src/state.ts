@@ -124,6 +124,20 @@ export class JobStore implements WorkerStatePort {
     return this.#records.getAttempt(id);
   }
 
+  #requireJob(id: string): Job {
+    const job = this.get(id);
+    if (!job) throw new Error(`Job disappeared from state storage: ${id}`);
+    return job;
+  }
+
+  #requireAttempt(id: string): Attempt {
+    const attempt = this.getAttempt(id);
+    if (!attempt) {
+      throw new Error(`Attempt disappeared from state storage: ${id}`);
+    }
+    return attempt;
+  }
+
   listAttempts(jobId: string): Attempt[] {
     return this.#records.listAttempts(jobId);
   }
@@ -183,7 +197,7 @@ export class JobStore implements WorkerStatePort {
           SET worker_token = ?, lease_expires_at = ?, heartbeat_at = ?, updated_at = ?
           WHERE id = ? AND lease_expires_at <= ?
         `).run(workerToken, lease, timestamp, timestamp, existing.id, timestamp);
-        attempt = this.getAttempt(existing.id)!;
+        attempt = this.#requireAttempt(existing.id);
         if (attempt.workerToken !== workerToken) {
           throw new Error(`Expired attempt was reclaimed concurrently: ${existing.id}`);
         }
@@ -212,8 +226,8 @@ export class JobStore implements WorkerStatePort {
           UPDATE jobs SET status = 'PREPARING', current_attempt_id = ?, updated_at = ?
           WHERE id = ? AND status = 'QUEUED'
         `).run(attemptId, timestamp, job.id);
-        attempt = this.getAttempt(attemptId)!;
-        job = this.get(job.id)!;
+        attempt = this.#requireAttempt(attemptId);
+        job = this.#requireJob(job.id);
         this.#ledger.recordEvent(job.id, attempt.id, "JOB_CLAIMED", { ordinal }, timestamp);
       }
       this.#database.exec("COMMIT");
@@ -232,7 +246,7 @@ export class JobStore implements WorkerStatePort {
       WHERE id = ? AND worker_token = ?
     `).run(timestamp, leaseIso(now, leaseMs), timestamp, attemptId, workerToken);
     if (result.changes !== 1) throw new Error(`Attempt lease was lost: ${attemptId}`);
-    return this.getAttempt(attemptId)!;
+    return this.#requireAttempt(attemptId);
   }
 
   transitionAttempt(
@@ -324,7 +338,7 @@ export class JobStore implements WorkerStatePort {
         to: next,
       }, timestamp);
       this.#database.exec("COMMIT");
-      return this.getAttempt(attemptId)!;
+      return this.#requireAttempt(attemptId);
     } catch (error) {
       this.#database.exec("ROLLBACK");
       throw error;
@@ -405,7 +419,7 @@ export class JobStore implements WorkerStatePort {
         timestamp,
       );
       this.#database.exec("COMMIT");
-      return this.getAttempt(attemptId)!;
+      return this.#requireAttempt(attemptId);
     } catch (error) {
       this.#database.exec("ROLLBACK");
       throw error;
@@ -460,7 +474,7 @@ export class JobStore implements WorkerStatePort {
         to: "STALE_SPEC",
       }, timestamp);
       this.#database.exec("COMMIT");
-      return this.get(jobId)!;
+      return this.#requireJob(jobId);
     } catch (error) {
       this.#database.exec("ROLLBACK");
       throw error;
@@ -550,7 +564,7 @@ export class JobStore implements WorkerStatePort {
         timestamp,
       );
       this.#database.exec("COMMIT");
-      return this.get(jobId)!;
+      return this.#requireJob(jobId);
     } catch (error) {
       this.#database.exec("ROLLBACK");
       throw error;
