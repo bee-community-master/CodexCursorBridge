@@ -24,8 +24,9 @@ import {
   assessCandidateChanges,
   candidateChangePresenceFailure,
   candidateTreeStabilityFailure,
-  firstVerificationFailure,
   repairFeedbackFor,
+  requiredTestChangeFailure,
+  verificationFailure,
 } from "./workflow-review-policy.js";
 
 const leaseMs = 60_000;
@@ -345,7 +346,12 @@ class WorkflowExecution {
     if (this.#finalChanges.files.length === 0) {
       this.#verification.push(candidateChangePresenceFailure());
     }
-    const failure = firstVerificationFailure(this.#verification);
+    const requiredTestFailure = requiredTestChangeFailure(
+      this.#task,
+      this.#finalChanges,
+    );
+    if (requiredTestFailure) this.#verification.push(requiredTestFailure);
+    const failure = verificationFailure(this.#verification);
     if (failure) return { kind: "failed", failure };
 
     this.#tree = treeAfterVerification;

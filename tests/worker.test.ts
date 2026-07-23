@@ -1,4 +1,10 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -285,6 +291,47 @@ describe("worker lease fencing", () => {
     expect(store.listEvents(job.id).at(-1)).toMatchObject({
       type: "REPORT_PERSISTENCE_FAILED",
     });
+  });
+
+  it("rewrites an existing preflight report with owner-only permissions", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "cursor-worker-"));
+    const store = new JobStore(path.join(directory, "jobs.sqlite"));
+    stores.push(store);
+    const job = store.createOrGet({
+      repositoryAlias: "demo",
+      taskId: "TASK-DEMO",
+      specVersion: 1,
+      specHash: "sha256:a",
+      taskCommitSha: "a".repeat(40),
+      taskBlobSha: "b".repeat(40),
+      targetOrigin: "owner/demo",
+      targetBaseSha: "c".repeat(40),
+      policyVersion: 2,
+      maxAttempts: 2,
+    });
+    const claim = store.claimNext("worker", 60_000)!;
+    const reportsDir = path.join(directory, "reports");
+    await mkdir(reportsDir);
+    const reportPath = path.join(reportsDir, `${job.id}.md`);
+    await writeFile(reportPath, "stale", { encoding: "utf8", mode: 0o644 });
+    await chmod(reportPath, 0o644);
+    mocks.loadMachineConfig.mockRejectedValue(
+      new Error("configuration read failed"),
+    );
+    const paths = {
+      projectRoot: directory,
+      home: directory,
+      configFile: path.join(directory, "config.json"),
+      databaseFile: path.join(directory, "jobs.sqlite"),
+      logsDir: path.join(directory, "logs"),
+      reportsDir,
+      worktreesDir: path.join(directory, "worktrees"),
+      tasksDir: path.join(directory, "tasks"),
+    } satisfies RuntimePaths;
+
+    await processClaim(store, claim, paths);
+
+    expect((await stat(reportPath)).mode & 0o777).toBe(0o600);
   });
 
   it("accepts explicit composition dependencies without module mocking", async () => {

@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type {
   AttestationData,
@@ -6,6 +6,18 @@ import type {
 } from "../application/workflow-ports.js";
 import type { RuntimePaths } from "../domain/configuration.js";
 import { redactSensitiveText } from "../application/redaction.js";
+import { writeOwnerOnlyAtomic } from "./owner-only-atomic-file.js";
+
+function redactedVerification(
+  results: AttestationData["verification"],
+): AttestationData["verification"] {
+  return results.map((result) => ({
+    ...result,
+    ...(result.output
+      ? { output: redactSensitiveText(result.output) }
+      : {}),
+  }));
+}
 
 export class WorkflowArtifactWriter {
   readonly #paths: RuntimePaths;
@@ -20,7 +32,7 @@ export class WorkflowArtifactWriter {
       this.#paths.reportsDir,
       `${data.job.id}.attestation.json`,
     );
-    await writeFile(attestationPath, `${JSON.stringify({
+    await writeOwnerOnlyAtomic(attestationPath, `${JSON.stringify({
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
       jobId: data.job.id,
@@ -38,7 +50,7 @@ export class WorkflowArtifactWriter {
       },
       candidate: data.tree,
       publication: data.publication,
-      verification: data.verification,
+      verification: redactedVerification(data.verification),
       attempts: data.attempts.map((attempt) => ({
         id: attempt.id,
         ordinal: attempt.ordinal,
@@ -56,7 +68,7 @@ export class WorkflowArtifactWriter {
         inputTokens: attempt.inputTokens,
         outputTokens: attempt.outputTokens,
       })),
-    }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    }, null, 2)}\n`);
     return attestationPath;
   }
 
@@ -108,7 +120,7 @@ export class WorkflowArtifactWriter {
       ...(data.error ? ["", "## 오류", "", redactSensitiveText(data.error)] : []),
       "",
     ];
-    await writeFile(reportPath, lines.join("\n"), { encoding: "utf8", mode: 0o600 });
+    await writeOwnerOnlyAtomic(reportPath, lines.join("\n"));
     return reportPath;
   }
 }

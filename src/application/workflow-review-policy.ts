@@ -1,5 +1,9 @@
 import type { ApprovedTask } from "../domain/task.js";
-import { assessChanges, type ChangeAssessment } from "./change-assessment.js";
+import {
+  assessChanges,
+  hasNonDeletedTestChange,
+  type ChangeAssessment,
+} from "./change-assessment.js";
 import type {
   CandidateTree,
   CollectedChanges,
@@ -22,16 +26,29 @@ export function assessCandidateChanges(
   });
 }
 
-export function firstVerificationFailure(
+export function verificationFailure(
   results: readonly VerificationResult[],
 ): VerificationResult | undefined {
-  return results.find((result) => result.status === "failed");
+  const failures = results.filter((result) => result.status === "failed");
+  if (failures.length <= 1) return failures[0];
+  return {
+    command: failures.map((failure) => failure.command).join(", "),
+    status: "failed",
+    durationMs: failures.reduce(
+      (duration, failure) => duration + failure.durationMs,
+      0,
+    ),
+    output: failures.map((failure) => [
+      `Command: ${failure.command}`,
+      failure.output ?? "No verifier output was captured.",
+    ].join("\n")).join("\n\n"),
+  };
 }
 
 export function repairFeedbackFor(failure: VerificationResult): string {
   return [
-    "Independent verification failed. Repair only the evidenced failure and stay within the approved scope.",
-    `Command: ${failure.command}`,
+    "Independent verification failed. Repair only the evidenced failures and stay within the approved scope.",
+    `Failed checks: ${failure.command}`,
     `Output:\n${failure.output ?? "No verifier output was captured."}`,
   ].join("\n\n");
 }
@@ -61,6 +78,28 @@ export function candidateChangePresenceFailure(): VerificationResult {
     output: [
       "The completed implementation contains no changed files.",
       "A Draft PR cannot be delivered without a candidate change.",
+    ].join("\n"),
+  };
+}
+
+export function requiredTestChangeFailure(
+  task: ApprovedTask,
+  changes: CollectedChanges,
+): VerificationResult | undefined {
+  if (
+    task.required_new_tests.length === 0
+    || hasNonDeletedTestChange(changes.files, changes.deletedFiles)
+  ) {
+    return undefined;
+  }
+  return {
+    command: "required-test-change",
+    status: "failed",
+    durationMs: 0,
+    output: [
+      "Required test changes are missing from the candidate.",
+      "At least one non-deleted test file must change to satisfy the approved Task.",
+      ...task.required_new_tests.map((requirement) => `- ${requirement}`),
     ].join("\n"),
   };
 }

@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
 import path from "node:path";
 import { parse, stringify } from "yaml";
+import { writeOwnerOnlyAtomic } from "./adapters/owner-only-atomic-file.js";
 import {
   approvedTaskSchema,
   computeSpecHash,
@@ -110,18 +110,7 @@ export async function approveTaskFile(
     verification,
   });
   const withHash = approvedTaskSchema.parse({ ...approved, spec_hash: computeSpecHash(approved) });
-  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, stringify(withHash, { lineWidth: 100 }), {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
-    await rename(temporary, file);
-  } catch (error) {
-    await rm(temporary, { force: true });
-    throw error;
-  }
+  await writeOwnerOnlyAtomic(file, stringify(withHash, { lineWidth: 100 }));
   return withHash;
 }
 

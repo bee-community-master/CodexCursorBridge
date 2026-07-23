@@ -31,6 +31,14 @@ function isTestFile(file: string): boolean {
     || /^(?:Test|Spec)[A-Z0-9].*(?:\.[^.]+)+$/.test(basename);
 }
 
+export function hasNonDeletedTestChange(
+  files: readonly string[],
+  deletedFiles: readonly string[],
+): boolean {
+  const deleted = new Set(deletedFiles);
+  return files.some((file) => !deleted.has(file) && isTestFile(file));
+}
+
 export function assessChanges(input: ChangeAssessmentInput): ChangeAssessment {
   const paths = evaluateChangedPaths(
     input.files,

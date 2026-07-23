@@ -32,14 +32,16 @@ The source was the approved implementation plan in the Codex task. It was normal
 | RED: architecture boundaries | Current branch | The architecture guard reported 1,258-line state, 1,070-line real adapter, missing inner-layer boundaries, and later the 1,269-line mixed adapter test suite. |
 | GREEN: architecture boundaries | Current branch | Domain/application ports now own policy and use-case contracts; SQLite, Cursor, Git, GitHub, verification, and artifact responsibilities are separate adapters with explicit injection and size/import-cycle guards. |
 | RED: clean-code convergence | Current branch | The function-size guard reported a 406-line workflow function; focused regressions also showed that worktree lookup failures and mismatched job scope could be mistaken for normal preparation paths. |
-| GREEN: clean-code convergence | Current branch | Workflow phases, failure handling, publication finalization, worker failures, Cursor recovery, worktree preparation, Draft PR creation, remote validation, and terminal-attempt policy now have named responsibilities; the error paths fail closed and the final five review passes found no further actionable changes. |
+| GREEN: clean-code convergence | Current branch | Workflow phases, failure handling, publication finalization, worker failures, Cursor recovery, worktree preparation, Draft PR creation, remote validation, and terminal-attempt policy now have named responsibilities with explicit boundaries. |
+| RED: broader contract review | Current branch | `required_new_tests` was prompt-only, existing report files could retain permissive modes, and attestation verification output relied only on upstream redaction. |
+| GREEN: broader contract review | Current branch | Required test changes are a repairable final-candidate gate, all simultaneous verification failures are preserved for the bounded repair, report/attestation rewrites are atomic and owner-only, and attestation diagnostics are redacted again at persistence. |
 
 ## Guarantees
 
 | # | Guarantee | Test or command | Type | Result |
 |---|---|---|---|---|
 | 1 | Task approval binds a locale-independent stable spec hash to target origin/base SHA, PR destination branch, context blobs, policy version, and verification profile; unknown fields and linked-file writes fail closed. | `tests/task.test.ts`, `tests/dispatch.test.ts` | Integration | PASS |
-| 2 | Traversal, minimatch negation, forbidden paths, out-of-scope paths, oversized diffs, and deleted tests block publication. | `tests/paths.test.ts`, `tests/verification.test.ts` | Unit | PASS |
+| 2 | Traversal, minimatch negation, forbidden paths, out-of-scope paths, oversized diffs, and deleted tests block publication; a non-empty `required_new_tests` contract also requires a non-deleted test file change and joins every current failure into the bounded repair evidence. | `tests/paths.test.ts`, `tests/verification.test.ts`, `tests/workflow.test.ts` | Unit and integration | PASS |
 | 3 | SQLite jobs preserve immutable task provenance and atomically manage Job/Attempt/Event/Lease/Effect state, publication records, delivery completion, recovery, confirmed cancellation, and local effectiveness metrics; terminal Attempt policy is derived from the transition model. | `tests/job-domain.test.ts`, `tests/state.test.ts` | Unit and integration | PASS |
 | 4 | Tracked edits, deletions, untracked files, symbolic links, whitespace paths, and cross-platform test naming conventions are included without following untrusted links; an approved-base index prevents assume-unchanged/skip-worktree flags or a prior Bridge commit from hiding candidate content, and byte-changing Git attribute transforms fail closed. | `tests/git.test.ts`, `tests/verification.test.ts` | Integration and unit | PASS |
 | 5 | Publication occurs only after verification covers one stable immutable tree and a second scope check; bounded repair evidence survives lease reclaim without rerunning completed implementation, and stale workers cannot prepare, fail, or report for a replacement lease. | `tests/workflow.test.ts`, `tests/worker.test.ts` | Integration with fake adapter | PASS |
@@ -48,13 +50,13 @@ The source was the approved implementation plan in the Codex task. It was normal
 | 8 | The built MCP server initializes and lists exactly start/status/cancel/report. | `pnpm smoke:mcp` | Protocol smoke | PASS |
 | 9 | Plugin and delegation skill describe durable supervisor execution, `DELIVERED_REVIEW_REQUIRED`, and attestation review. | `tests/plugin.test.ts`, plugin validator, skill quick validator | Packaging | PASS |
 | 10 | No known dependency advisories remain. | `pnpm audit` | Security | PASS |
-| 11 | Verifier processes reject dynamic-loader/control overrides, receive a credential-scrubbed environment and macOS sandbox profile with network denied, and cannot resolve executables through writable path aliases; persisted diagnostics are bounded, redacted, and owner-readable only. | `tests/task.test.ts`, `tests/sandbox.test.ts`, `tests/redaction.test.ts`, `tests/cursor-runner.test.ts`, `tests/workflow-artifact-writer.test.ts` | Unit and integration | PASS |
+| 11 | Verifier processes reject dynamic-loader/control overrides, receive a credential-scrubbed environment and macOS sandbox profile with network denied, and cannot resolve executables through writable path aliases; persisted diagnostics are bounded, redacted at the artifact boundary, atomically replaced, and owner-readable only. | `tests/task.test.ts`, `tests/sandbox.test.ts`, `tests/redaction.test.ts`, `tests/cursor-runner.test.ts`, `tests/workflow-artifact-writer.test.ts`, `tests/worker.test.ts` | Unit and integration | PASS |
 | 12 | Domain/application imports point inward, source imports are acyclic, implementation files stay below 700 lines, individual functions stay below 180 lines, and test suites stay below 900 lines. | `tests/architecture.test.ts` | Architecture | PASS |
 
 ## Final verification
 
-- `pnpm verify`: PASS — lint, typecheck, 176 tests in 26 files, coverage, build, MCP smoke.
-- Coverage: statements 87.24%, branches 81.42%, functions 97.22%, lines 90.29% for the core policy modules.
+- `pnpm verify`: PASS — lint, typecheck, 180 tests in 27 files, coverage, build, MCP smoke.
+- Coverage: statements 87.14%, branches 81.03%, functions 97.32%, lines 90.29% for the core policy modules.
 - Built supervisor runtime smoke: PASS — schema v3 DB initialized with mode `0600`, zero-job stats read back, and SIGINT shut down cleanly.
 - Real macOS verifier sandbox smoke: PASS — an allowlisted worktree write succeeded while network access and reads from a non-sensitive test Keychain outside the allowlisted roots were denied.
 - `pnpm smoke:cursor`: BLOCKED BEFORE SDK CALL — this Mac has no `codex-cursor-bridge/cursor-api-key` Keychain item; bootstrap/authentication remains an explicit owner action.

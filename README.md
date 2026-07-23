@@ -8,7 +8,7 @@ Codex가 계획하고 사용자가 승인한 작업을 Cursor가 구현하도록
 2. 커밋된 Task의 commit/blob SHA를 SQLite Job에 기록합니다.
 3. launchd가 관리하는 supervisor가 Job을 원자적으로 claim하고 lease/heartbeat를 유지합니다.
 4. Cursor는 프로젝트 설정 source가 비활성화된 SDK sandbox에서 구조화된 `completed`, `blocked`, `needs_input` 결과를 제출하며, repair가 필요하면 실패 명령과 출력을 다음 시도에 내구적으로 보존합니다.
-5. Bridge는 승인 기준에서 만든 독립 Git index, 최소 환경, 네트워크 차단 sandbox로 검증하고, 검증 전후의 immutable candidate tree와 변경 범위를 다시 대조합니다.
+5. Bridge는 승인 기준에서 만든 독립 Git index, 최소 환경, 네트워크 차단 sandbox로 검증하고, 검증 전후의 immutable candidate tree와 변경 범위를 다시 대조합니다. `required_new_tests`가 있으면 삭제되지 않은 테스트 파일 변경도 최종 후보에 포함되어야 하며, 다른 검증 실패와 함께 제한된 repair 근거로 전달됩니다.
 6. 최종 후보 tree/patch hash가 고정된 뒤 Git hook·commit/push signing을 비활성화하고, 등록된 fetch/push 원격에만 commit, push, Draft PR을 멱등 체크포인트로 수행합니다.
 7. 성공 상태는 `DELIVERED_REVIEW_REQUIRED`입니다. 자동 구현 완료가 사람/Codex 리뷰 완료를 뜻하지 않습니다.
 
@@ -71,7 +71,7 @@ Codex에 출력된 alias, Task ID, spec version, spec hash로 시작을 요청�
 - 성공 전달: `DELIVERED_REVIEW_REQUIRED`
 - 사람 확인 필요: `BLOCKED`, `FAILED`, `STALE_SPEC`, `SCOPE_VIOLATION`, `CANCELLED`
 
-실행 로그, 보고서, attestation, SQLite 진단은 자격 증명 형태를 마스킹하고 소유자 전용 권한으로 저장합니다. 전달 완료 직후 정리가 실패하면 남은 worktree 또는 local branch를 확인할 수 있습니다. 정리 도중 프로세스가 종료되면 `cleanupStatus: PENDING`일 수 있으며, 이때 최종 진실은 Draft PR과 attestation입니다.
+실행 로그, 보고서, attestation, SQLite 진단은 자격 증명 형태를 마스킹하고 소유자 전용 권한으로 저장합니다. 보고서와 attestation은 재작성할 때도 원자적으로 교체하며 `0600` 권한을 다시 강제합니다. 전달 완료 직후 정리가 실패하면 남은 worktree 또는 local branch를 확인할 수 있습니다. 정리 도중 프로세스가 종료되면 `cleanupStatus: PENDING`일 수 있으며, 이때 최종 진실은 Draft PR과 attestation입니다.
 
 로컬 누적 성과는 다음으로 볼 수 있습니다.
 

@@ -1,15 +1,8 @@
-import { randomUUID } from "node:crypto";
-import {
-  chmod,
-  mkdir,
-  readFile,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, mkdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import { writeOwnerOnlyAtomic } from "./adapters/owner-only-atomic-file.js";
 import type {
   MachineConfig,
   RepositoryConfig,
@@ -72,19 +65,7 @@ export async function saveMachineConfig(file: string, config: MachineConfig): Pr
   const directory = path.dirname(file);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
-  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, `${JSON.stringify(parsed, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
-    await chmod(temporary, 0o600);
-    await rename(temporary, file);
-  } catch (error) {
-    await rm(temporary, { force: true });
-    throw error;
-  }
+  await writeOwnerOnlyAtomic(file, `${JSON.stringify(parsed, null, 2)}\n`);
 }
 
 export function addRepository(config: MachineConfig, alias: string, repository: RepositoryConfig): MachineConfig {

@@ -220,6 +220,42 @@ describe("workflow orchestration", () => {
     expect(store.listAttempts(claim.job.id)).toHaveLength(2);
   });
 
+  it("repairs a candidate that omits the Task's required test change", async () => {
+    const { store, claim } = await fixture();
+    const taskRequiringTests = {
+      ...task,
+      allowed_paths: ["src/**", "tests/**"],
+      required_new_tests: ["Add a regression test for the changed behavior."],
+    };
+    const fake = adapter(
+      [
+        ["src/demo.ts"],
+        ["src/demo.ts"],
+        ["src/demo.ts", "tests/demo.test.ts"],
+        ["src/demo.ts", "tests/demo.test.ts"],
+      ],
+      ["failed", "passed"],
+    );
+
+    await executeWorkflow(
+      store,
+      claim,
+      taskRequiringTests,
+      repository,
+      fake,
+    );
+
+    expect(store.get(claim.job.id)?.status).toBe("DELIVERED_REVIEW_REQUIRED");
+    expect(fake.runImplementer).toHaveBeenCalledTimes(2);
+    expect(fake.runImplementer).toHaveBeenLastCalledWith(
+      expect.anything(),
+      taskRequiringTests,
+      expect.objectContaining({ ordinal: 2 }),
+      expect.stringMatching(/(?=[\s\S]*failing assertion)(?=[\s\S]*required test)/i),
+    );
+    expect(fake.publish).toHaveBeenCalledOnce();
+  });
+
   it("does not publish a candidate tree that changed during independent verification", async () => {
     const { store, claim } = await fixture();
     const fake = adapter(

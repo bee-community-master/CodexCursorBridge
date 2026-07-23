@@ -1,5 +1,6 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import { writeOwnerOnlyAtomic } from "./adapters/owner-only-atomic-file.js";
 import type {
   PublicationStatePort,
   WorkerStatePort,
@@ -107,7 +108,7 @@ async function writePreflightReport(
   await mkdir(reportsDir, { recursive: true, mode: 0o700 });
   const reportPath = path.join(reportsDir, `${jobId}.md`);
   const job = store.get(jobId);
-  await writeFile(reportPath, [
+  await writeOwnerOnlyAtomic(reportPath, [
     `# ${job?.taskId ?? jobId} Cursor 실행 보고서`,
     "",
     `- 상태: ${job?.status ?? "FAILED"}`,
@@ -116,7 +117,7 @@ async function writePreflightReport(
     "",
     message,
     "",
-  ].join("\n"), { encoding: "utf8", mode: 0o600 });
+  ].join("\n"));
   store.update(jobId, { reportPath });
 }
 
