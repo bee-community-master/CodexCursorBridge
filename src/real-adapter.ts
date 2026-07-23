@@ -7,15 +7,28 @@ import {
   type SDKCustomTool,
   type SDKJsonValue,
 } from "@cursor/sdk";
-import { access, appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, appendFile, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { stringify } from "yaml";
 import { z } from "zod";
 import type { MachineConfig, RepositoryConfig, RuntimePaths } from "./config.js";
-import { collectChanges, computeCandidateTree, git, runFile } from "./git.js";
+import {
+  assertGitHubRemote,
+  assertWorktreeIdentity,
+  captureWorktreeIdentity,
+  collectChanges,
+  collectTreeChanges,
+  computeCandidateTree,
+  git,
+  runFile,
+} from "./git.js";
 import { readCursorApiKey } from "./keychain.js";
 import { chooseConfiguredGrok } from "./model.js";
+import {
+  redactSensitiveText as redact,
+  safeErrorMessage as errorOutput,
+} from "./redaction.js";
 import { createVerificationSandbox } from "./sandbox.js";
 import type { Attempt, JobStore } from "./state.js";
 import type { ApprovedTask } from "./task.js";
@@ -34,26 +47,6 @@ function slug(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 }
 
-function tail(value: string, limit = 8_000): string {
-  return value.length <= limit ? value : value.slice(-limit);
-}
-
-function redact(value: string): string {
-  return value
-    .replace(/\b(?:sk|gh[opusr])[-_][A-Za-z0-9_-]{12,}\b/gi, "[REDACTED]")
-    .replace(/((?:api[_ -]?key|token|password|secret)\s*[:=]\s*)\S+/gi, "$1[REDACTED]");
-}
-
-function errorOutput(error: unknown): string {
-  if (!(error instanceof Error)) return redact(tail(String(error)));
-  const processError = error as Error & { stdout?: string; stderr?: string };
-  return redact(tail([
-    processError.message,
-    processError.stdout,
-    processError.stderr,
-  ].filter(Boolean).join("\n")));
-}
-
 function eventSummary(event: { type: string; name?: string; status?: string }): string {
   return [event.type, event.name, event.status].filter(Boolean).join(" ");
 }
@@ -66,6 +59,7 @@ const outcomeSchema = z.object({
 
 interface PullRequestInfo {
   state: string;
+  baseRefName: string;
   headRefName: string;
   headRefOid?: string;
   headRepository: { nameWithOwner: string };
@@ -130,7 +124,12 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
   async #log(message: string): Promise<void> {
     const job = this.#store.get(this.#jobId);
     if (job?.logPath) {
-      await appendFile(job.logPath, `[${new Date().toISOString()}] ${redact(message)}\n`, "utf8");
+      await appendFile(
+        job.logPath,
+        `[${new Date().toISOString()}] ${redact(message)}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+      await chmod(job.logPath, 0o600);
     }
   }
 
@@ -143,14 +142,122 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
       "--repo",
       repository.origin,
       "--json",
-      "state,headRefName,headRefOid,headRepository,url,isDraft",
+      "state,baseRefName,headRefName,headRefOid,headRepository,url,isDraft",
     ]);
     const info = JSON.parse(output.stdout) as PullRequestInfo;
     if (info.state !== "OPEN") throw new Error(`Existing PR is not open: #${task.pull_request.number}`);
     if (info.headRepository.nameWithOwner !== repository.origin) {
       throw new Error("Existing PR head is in a fork and cannot be updated safely");
     }
+    if (!info.isDraft) throw new Error("Existing pull request must remain a draft");
+    if (info.headRefName !== task.target.base_ref) {
+      throw new Error("STALE_SPEC: existing PR head branch changed after task approval");
+    }
+    if (info.baseRefName !== task.target.destination_ref) {
+      throw new Error("STALE_SPEC: existing PR destination branch changed after task approval");
+    }
     return info;
+  }
+
+  #hasDurableEffect(kind: string, idempotencyKey: string): boolean {
+    const effect = this.#store.getEffect(idempotencyKey);
+    return effect !== undefined
+      && effect.jobId === this.#jobId
+      && effect.kind === kind
+      && effect.status !== "FAILED";
+  }
+
+  async #assertDirectChildOfApprovedBase(
+    worktree: string,
+    headSha: string,
+    approvedBaseSha: string,
+  ): Promise<void> {
+    const commit = await git(
+      worktree,
+      "cat-file",
+      "-p",
+      headSha,
+    );
+    const header = commit.split("\n\n", 1)[0] ?? "";
+    const parents = header
+      .split("\n")
+      .filter((line) => line.startsWith("parent "))
+      .map((line) => line.slice("parent ".length));
+    if (
+      parents.length !== 1
+      || parents[0] !== approvedBaseSha
+    ) {
+      throw new Error(
+        "Bridge publication commit is not a direct child of the approved base",
+      );
+    }
+  }
+
+  async #isBridgeOwnedHead(
+    worktree: string,
+    headSha: string,
+    approvedBaseSha: string,
+  ): Promise<boolean> {
+    const treeHash = await git(worktree, "rev-parse", "HEAD^{tree}");
+    const effect = this.#store.getEffect(`commit:${this.#jobId}:${treeHash}`);
+    const checkpointMatches = effect !== undefined
+      && effect.jobId === this.#jobId
+      && effect.kind === "git_commit"
+      && effect.status !== "FAILED"
+      && (
+        effect.status !== "COMPLETED"
+        || effect.payload?.headSha === undefined
+        || effect.payload.headSha === headSha
+      );
+    if (!checkpointMatches) return false;
+    await this.#assertDirectChildOfApprovedBase(
+      worktree,
+      headSha,
+      approvedBaseSha,
+    );
+    return true;
+  }
+
+  async #assertPreparedHead(
+    worktree: string,
+    approvedBaseSha: string,
+  ): Promise<void> {
+    const currentHead = await git(worktree, "rev-parse", "HEAD");
+    if (
+      currentHead !== approvedBaseSha
+      && !await this.#isBridgeOwnedHead(
+        worktree,
+        currentHead,
+        approvedBaseSha,
+      )
+    ) {
+      throw new Error("STALE_SPEC: prepared worktree HEAD is not the approved base or a Bridge commit");
+    }
+  }
+
+  #assertPublicationLease(attempt: Attempt): void {
+    this.#store.assertActiveAttempt(
+      this.#jobId,
+      attempt.id,
+      attempt.workerToken,
+      "PUBLISHING",
+    );
+  }
+
+  async #assertPreparedWorktree(prepared: PreparedWorktree): Promise<void> {
+    if (prepared.gitIdentity) {
+      await assertWorktreeIdentity(prepared.worktree, prepared.gitIdentity);
+      const currentBranch = await git(
+        prepared.worktree,
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "HEAD",
+      );
+      if (currentBranch !== prepared.localBranch) {
+        throw new Error("Prepared worktree branch changed after preparation");
+      }
+    }
   }
 
   async prepare(
@@ -160,24 +267,67 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
   ): Promise<PreparedWorktree> {
     const worktree = path.join(this.#paths.worktreesDir, task.repository, job.id);
     await mkdir(path.dirname(worktree), { recursive: true, mode: 0o700 });
-    await git(repository.root, "fetch", "--prune", "origin");
-    const existingPr = await this.#existingPullRequest(task, repository);
-    if (existingPr?.headRefOid && existingPr.headRefOid !== task.target.base_sha) {
-      throw new Error("STALE_SPEC: existing PR head changed after task approval");
-    }
-    const names = branchNames(task, job.id, existingPr?.headRefName);
-
+    let existingWorktree = false;
     try {
       await access(worktree);
-      await git(worktree, "rev-parse", "--is-inside-work-tree");
+      existingWorktree = true;
+    } catch {
+      // The first execution has no durable worktree yet.
+    }
+    let existingGitIdentity: Awaited<ReturnType<typeof captureWorktreeIdentity>> | undefined;
+    if (existingWorktree) {
+      this.#store.update(this.#jobId, {
+        worktree,
+        baseSha: task.target.base_sha,
+      });
+      existingGitIdentity = await captureWorktreeIdentity(worktree, repository.root);
+      const currentJob = this.#store.get(this.#jobId);
+      const currentAttempt = currentJob?.currentAttemptId
+        ? this.#store.getAttempt(currentJob.currentAttemptId)
+        : undefined;
+      if (
+        currentAttempt?.gitConfigDigest
+        && currentAttempt.gitConfigDigest !== existingGitIdentity.configDigest
+      ) {
+        throw new Error(
+          "STALE_SPEC: prepared worktree Git configuration identity changed",
+        );
+      }
+      if (
+        currentAttempt
+        && currentAttempt.status !== "PREPARING"
+        && !currentAttempt.gitConfigDigest
+      ) {
+        throw new Error(
+          "STALE_SPEC: prepared worktree Git configuration identity is missing",
+        );
+      }
+    }
+
+    await git(repository.root, "fetch", "--prune", "origin");
+    const existingPr = await this.#existingPullRequest(task, repository);
+    const names = branchNames(task, job.id, existingPr?.headRefName);
+    if (
+      existingPr?.headRefOid
+      && existingPr.headRefOid !== task.target.base_sha
+      && !this.#hasDurableEffect(
+        "git_push",
+        `push:${this.#jobId}:${names.pushBranch}:${existingPr.headRefOid}`,
+      )
+    ) {
+      throw new Error("STALE_SPEC: existing PR head changed after task approval");
+    }
+
+    if (existingGitIdentity) {
+      await assertWorktreeIdentity(worktree, existingGitIdentity);
+      await this.#assertPreparedHead(worktree, task.target.base_sha);
       return {
         worktree,
         baseSha: task.target.base_sha,
         pushBranch: names.pushBranch,
         localBranch: names.localBranch,
+        gitIdentity: existingGitIdentity,
       };
-    } catch {
-      // The first execution has no durable worktree yet.
     }
 
     let localBranchExists = false;
@@ -188,10 +338,20 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
       // A new job normally has no local branch yet.
     }
     if (localBranchExists) {
-      await git(repository.root, "worktree", "add", worktree, names.localBranch);
+      await git(
+        repository.root,
+        "-c",
+        "core.hooksPath=/dev/null",
+        "worktree",
+        "add",
+        worktree,
+        names.localBranch,
+      );
     } else {
       await git(
         repository.root,
+        "-c",
+        "core.hooksPath=/dev/null",
         "worktree",
         "add",
         "-b",
@@ -200,12 +360,14 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
         task.target.base_sha,
       );
     }
-    const baseSha = await git(worktree, "rev-parse", "HEAD");
-    if (baseSha !== task.target.base_sha) {
-      throw new Error("STALE_SPEC: prepared worktree does not match the approved base SHA");
-    }
+    this.#store.update(this.#jobId, {
+      worktree,
+      baseSha: task.target.base_sha,
+    });
+    const gitIdentity = await captureWorktreeIdentity(worktree, repository.root);
+    await this.#assertPreparedHead(worktree, task.target.base_sha);
     await this.#log(`Prepared worktree ${worktree} from ${task.target.base_sha}`);
-    return { worktree, baseSha, ...names };
+    return { worktree, baseSha: task.target.base_sha, gitIdentity, ...names };
   }
 
   async #createOrResumeAgent(
@@ -227,7 +389,7 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
       local: {
         cwd: prepared.worktree,
         store: this.#cursorStore,
-        settingSources: ["project" as const],
+        settingSources: [],
         sandboxOptions: { enabled: true },
         autoReview: true,
         customTools,
@@ -245,46 +407,90 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
     attempt: Attempt,
     repairFeedback?: string,
   ): Promise<ImplementerOutcome> {
+    await this.#assertPreparedWorktree(prepared);
     let submitted: z.infer<typeof outcomeSchema> | undefined;
     const customTools = {
       submit_bridge_outcome: outputTool((outcome) => {
         if (submitted) throw new Error("submit_bridge_outcome may only be called once");
-        submitted = outcome;
+        submitted = {
+          ...outcome,
+          summary: redact(outcome.summary),
+          ...(outcome.reason ? { reason: redact(outcome.reason) } : {}),
+        };
         this.#store.updateAttempt(attempt.id, attempt.workerToken, {
-          outcome: outcome.status,
-          outcomeSummary: outcome.summary,
-          ...(outcome.reason ? { outcomeReason: outcome.reason } : {}),
+          outcome: submitted.status,
+          outcomeSummary: submitted.summary,
+          ...(submitted.reason ? { outcomeReason: submitted.reason } : {}),
         });
       }),
     };
-    if (
-      attempt.cursorAgentId
-      && attempt.cursorRunId
-      && attempt.outcome
-      && attempt.outcomeSummary
-    ) {
+    if (attempt.cursorAgentId && attempt.cursorRunId) {
+      const priorRunOptions = {
+        runtime: "local" as const,
+        cwd: prepared.worktree,
+        store: this.#cursorStore,
+      };
+      let priorRun: Run | undefined;
       try {
-        const priorRun = await Agent.getRun(attempt.cursorRunId, {
-          runtime: "local",
-          cwd: prepared.worktree,
-          store: this.#cursorStore,
-        });
-        if (priorRun.status === "finished") {
-          return {
-            status: attempt.outcome,
-            agentId: attempt.cursorAgentId,
-            runId: attempt.cursorRunId,
-            ...(priorRun.requestId ? { requestId: priorRun.requestId } : {}),
-            summary: redact(attempt.outcomeSummary),
-            ...(attempt.outcomeReason ? { reason: redact(attempt.outcomeReason) } : {}),
-            ...(priorRun.usage ? {
-              inputTokens: priorRun.usage.inputTokens,
-              outputTokens: priorRun.usage.outputTokens,
-            } : {}),
-          };
-        }
+        priorRun = await Agent.getRun(attempt.cursorRunId, priorRunOptions);
       } catch (error) {
-        await this.#log(`Could not read prior Cursor run; forcing recovery: ${errorOutput(error)}`);
+        const detail = errorOutput(error);
+        await this.#log(`Could not safely read prior Cursor run: ${detail}`);
+        throw new Error(`Could not safely recover the prior Cursor run: ${detail}`);
+      }
+      const hasPersistedOutcome = attempt.outcome !== undefined
+        && attempt.outcomeSummary !== undefined;
+      if (priorRun?.status === "running" && hasPersistedOutcome) {
+        let cancellationFailure: unknown;
+        try {
+          await Agent.cancelRun(attempt.cursorRunId, priorRunOptions);
+        } catch (error) {
+          cancellationFailure = error;
+        }
+        try {
+          priorRun = await Agent.getRun(attempt.cursorRunId, priorRunOptions);
+        } catch (error) {
+          const detail = errorOutput(error);
+          throw new Error(`Could not confirm the prior Cursor run stopped: ${detail}`);
+        }
+        if (priorRun.status === "running") {
+          const detail = cancellationFailure
+            ? `: ${errorOutput(cancellationFailure)}`
+            : "";
+          throw new Error(`Cursor run is still active after restoring its durable outcome${detail}`);
+        }
+        if (cancellationFailure) {
+          await this.#log(
+            "Cursor cancellation reported an error, but terminal readback confirmed the run stopped.",
+          );
+        }
+      }
+      if (hasPersistedOutcome || priorRun?.status === "finished") {
+        return {
+          status: hasPersistedOutcome ? attempt.outcome ?? "needs_input" : "needs_input",
+          agentId: attempt.cursorAgentId,
+          runId: attempt.cursorRunId,
+          ...(priorRun.requestId ? { requestId: priorRun.requestId } : {}),
+          summary: redact(hasPersistedOutcome
+            ? attempt.outcomeSummary ?? "Cursor finished without a persisted structured outcome."
+            : priorRun.result ?? "Cursor finished without a persisted structured outcome."),
+          ...(hasPersistedOutcome
+            ? attempt.outcomeReason
+              ? { reason: redact(attempt.outcomeReason) }
+              : {}
+            : {
+              reason: "Cursor finished without submitting a durable structured outcome.",
+            }),
+          ...(priorRun.usage ? {
+            inputTokens: priorRun.usage.inputTokens,
+            outputTokens: priorRun.usage.outputTokens,
+          } : {}),
+        };
+      }
+      if (priorRun?.status === "error" || priorRun?.status === "cancelled") {
+        throw new Error(
+          priorRun.error?.message ?? `Cursor run ended with ${priorRun.status}`,
+        );
       }
     }
     const agent = await this.#createOrResumeAgent(prepared, task, attempt, customTools);
@@ -377,14 +583,19 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
 
   async collectChanges(
     prepared: PreparedWorktree,
+    candidate?: Awaited<ReturnType<typeof computeCandidateTree>>,
   ): Promise<Awaited<ReturnType<typeof collectChanges>>> {
-    return collectChanges(prepared.worktree, prepared.baseSha);
+    await this.#assertPreparedWorktree(prepared);
+    return candidate
+      ? collectTreeChanges(prepared.worktree, prepared.baseSha, candidate.treeHash)
+      : collectChanges(prepared.worktree, prepared.baseSha);
   }
 
   async runVerification(
     prepared: PreparedWorktree,
     task: ApprovedTask,
   ): Promise<VerificationResult[]> {
+    await this.#assertPreparedWorktree(prepared);
     const results: VerificationResult[] = [];
     await mkdir(this.#paths.home, { recursive: true, mode: 0o700 });
     for (const item of task.verification.commands) {
@@ -436,14 +647,15 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
   }
 
   async computeCandidateTree(prepared: PreparedWorktree): Promise<Awaited<ReturnType<typeof computeCandidateTree>>> {
+    await this.#assertPreparedWorktree(prepared);
     const candidate = await computeCandidateTree(prepared.worktree, prepared.baseSha);
     const currentHead = await git(prepared.worktree, "rev-parse", "HEAD");
     if (currentHead !== prepared.baseSha) {
-      const currentTree = await git(prepared.worktree, "rev-parse", "HEAD^{tree}");
-      const commitEffect = this.#store.getEffect(
-        `commit:${this.#jobId}:${candidate.treeHash}`,
-      );
-      if (!commitEffect || currentTree !== candidate.treeHash) {
+      if (!await this.#isBridgeOwnedHead(
+        prepared.worktree,
+        currentHead,
+        prepared.baseSha,
+      )) {
         throw new Error("Implementer changed HEAD; only bridge-owned commits may be published");
       }
     }
@@ -456,6 +668,8 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
     input: PublicationInput,
     attempt: Attempt,
   ): Promise<string> {
+    await this.#assertPreparedWorktree(prepared);
+    this.#assertPublicationLease(attempt);
     const key = `commit:${this.#jobId}:${input.tree.treeHash}`;
     const effect = this.#store.beginEffect(this.#jobId, attempt.id, "git_commit", key);
     const currentTree = await git(prepared.worktree, "rev-parse", "HEAD^{tree}");
@@ -463,7 +677,7 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
     if (currentTree === input.tree.treeHash) {
       headSha = await git(prepared.worktree, "rev-parse", "HEAD");
     } else {
-      await git(prepared.worktree, "add", "-A");
+      await git(prepared.worktree, "read-tree", input.tree.treeHash);
       const stagedTree = await git(prepared.worktree, "write-tree");
       if (stagedTree !== input.tree.treeHash) {
         throw new Error("Candidate tree changed between attestation and commit");
@@ -472,7 +686,12 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
         prepared.worktree,
         "-c",
         "core.hooksPath=/dev/null",
+        "-c",
+        "user.name=Codex Cursor Bridge",
+        "-c",
+        "user.email=codex-cursor-bridge@example.invalid",
         "commit",
+        "--no-gpg-sign",
         "-m",
         `chore(cursor): ${task.title}`,
       );
@@ -482,6 +701,11 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
     if (committedTree !== input.tree.treeHash) {
       throw new Error("Committed tree does not match the attested candidate");
     }
+    await this.#assertDirectChildOfApprovedBase(
+      prepared.worktree,
+      headSha,
+      prepared.baseSha,
+    );
     if (
       effect.status === "COMPLETED"
       && effect.payload?.headSha
@@ -497,9 +721,13 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
 
   async #pushCandidate(
     prepared: PreparedWorktree,
+    task: ApprovedTask,
     headSha: string,
     attempt: Attempt,
   ): Promise<string> {
+    await this.#assertPreparedWorktree(prepared);
+    this.#assertPublicationLease(attempt);
+    await assertGitHubRemote(prepared.worktree, task.target.origin);
     const key = `push:${this.#jobId}:${prepared.pushBranch}:${headSha}`;
     const effect = this.#store.beginEffect(this.#jobId, attempt.id, "git_push", key);
     const remoteBefore = await git(
@@ -508,9 +736,30 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
       "origin",
       `refs/heads/${prepared.pushBranch}`,
     );
-    const existingSha = remoteBefore.split(/\s+/)[0];
+    const existingSha = remoteBefore.split(/\s+/)[0] ?? "";
+    const approvedRemoteSha = task.pull_request.mode === "existing_pr"
+      ? task.target.base_sha
+      : "";
+    if (existingSha !== headSha && existingSha !== approvedRemoteSha) {
+      throw new Error("STALE_SPEC: remote head changed after task approval");
+    }
+    let pushFailure: unknown;
     if (existingSha !== headSha) {
-      await git(prepared.worktree, "push", "origin", `HEAD:${prepared.pushBranch}`);
+      try {
+        await git(
+          prepared.worktree,
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          "push.gpgSign=false",
+          "push",
+          `--force-with-lease=refs/heads/${prepared.pushBranch}:${approvedRemoteSha}`,
+          "origin",
+          `${headSha}:refs/heads/${prepared.pushBranch}`,
+        );
+      } catch (error) {
+        pushFailure = error;
+      }
     }
     const remoteAfter = await git(
       prepared.worktree,
@@ -519,7 +768,15 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
       `refs/heads/${prepared.pushBranch}`,
     );
     const remoteHeadSha = remoteAfter.split(/\s+/)[0] ?? "";
-    if (remoteHeadSha !== headSha) throw new Error("Remote branch readback does not match local HEAD");
+    if (remoteHeadSha !== headSha) {
+      if (pushFailure) {
+        throw new Error(`Git push failed and remote readback did not contain the candidate: ${errorOutput(pushFailure)}`);
+      }
+      throw new Error("Remote branch readback does not match local HEAD");
+    }
+    if (pushFailure) {
+      await this.#log("Git push reported an error, but exact remote readback confirmed the candidate.");
+    }
     if (effect.status !== "COMPLETED") {
       this.#store.completeEffect(effect.id, { headSha, remoteHeadSha });
     }
@@ -533,6 +790,7 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
     input: PublicationInput,
     attempt: Attempt,
   ): Promise<{ url: string; isDraft: boolean; headRefOid: string }> {
+    this.#assertPublicationLease(attempt);
     const key = `pull_request:${this.#jobId}:${prepared.pushBranch}`;
     const effect = this.#store.beginEffect(this.#jobId, attempt.id, "pull_request", key);
     let prUrl: string;
@@ -541,21 +799,25 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
       if (!existing) throw new Error("Existing pull request disappeared");
       prUrl = existing.url;
     } else {
-      const listed = await runFile("gh", [
-        "pr",
-        "list",
-        "--repo",
-        repository.origin,
-        "--state",
-        "open",
-        "--head",
-        prepared.pushBranch,
-        "--json",
-        "url",
-      ]);
-      const open = JSON.parse(listed.stdout) as Array<{ url: string }>;
-      if (open[0]) {
-        prUrl = open[0].url;
+      const findOpenPullRequest = async (): Promise<string | undefined> => {
+        const listed = await runFile("gh", [
+          "pr",
+          "list",
+          "--repo",
+          repository.origin,
+          "--state",
+          "open",
+          "--head",
+          prepared.pushBranch,
+          "--json",
+          "url",
+        ]);
+        const open = JSON.parse(listed.stdout) as Array<{ url: string }>;
+        return open[0]?.url;
+      };
+      const open = await findOpenPullRequest();
+      if (open) {
+        prUrl = open;
       } else {
         const bodyDirectory = await mkdtemp(path.join(os.tmpdir(), "cursor-bridge-pr-"));
         const bodyFile = path.join(bodyDirectory, "body.md");
@@ -584,7 +846,7 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
             "--repo",
             repository.origin,
             "--base",
-            task.target.base_ref,
+            task.target.destination_ref,
             "--head",
             prepared.pushBranch,
             "--title",
@@ -593,6 +855,17 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
             bodyFile,
           ]);
           prUrl = created.stdout.trim();
+        } catch (error) {
+          const reconciled = await findOpenPullRequest();
+          if (!reconciled) {
+            throw new Error(
+              `Draft pull request creation failed and no matching PR was found: ${errorOutput(error)}`,
+            );
+          }
+          prUrl = reconciled;
+          await this.#log(
+            "Draft PR creation reported an error, but exact branch lookup found the created PR.",
+          );
         } finally {
           await rm(bodyDirectory, { recursive: true, force: true });
         }
@@ -605,13 +878,31 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
       "--repo",
       repository.origin,
       "--json",
-      "url,isDraft,headRefOid",
+      "state,url,isDraft,baseRefName,headRefName,headRefOid,headRepository",
     ]);
     const info = JSON.parse(readback.stdout) as {
+      state: string;
       url: string;
       isDraft: boolean;
+      baseRefName: string;
+      headRefName: string;
       headRefOid: string;
+      headRepository: { nameWithOwner: string };
     };
+    if (info.state !== "OPEN") {
+      throw new Error("Pull request is no longer open");
+    }
+    if (
+      info.headRefName !== prepared.pushBranch
+      || info.headRepository.nameWithOwner !== repository.origin
+    ) {
+      throw new Error("Pull request readback does not match the published head branch");
+    }
+    if (
+      info.baseRefName !== task.target.destination_ref
+    ) {
+      throw new Error("Pull request readback does not match the approved base branch");
+    }
     if (effect.status !== "COMPLETED") {
       this.#store.completeEffect(effect.id, {
         url: info.url,
@@ -627,12 +918,12 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
     task: ApprovedTask,
     repository: RepositoryConfig,
     input: PublicationInput,
+    attempt: Attempt,
   ): Promise<PublicationResult> {
-    const attemptId = this.#store.get(this.#jobId)?.currentAttemptId;
-    const attempt = attemptId ? this.#store.getAttempt(attemptId) : undefined;
-    if (!attempt) throw new Error("Cannot publish without an active durable attempt");
+    await this.#assertPreparedWorktree(prepared);
+    this.#assertPublicationLease(attempt);
     const headSha = await this.#commitCandidate(prepared, task, input, attempt);
-    const remoteHeadSha = await this.#pushCandidate(prepared, headSha, attempt);
+    const remoteHeadSha = await this.#pushCandidate(prepared, task, headSha, attempt);
     const pullRequest = await this.#ensurePullRequest(
       prepared,
       task,
@@ -682,8 +973,12 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
         cursorRunId: attempt.cursorRunId,
         cursorRequestId: attempt.cursorRequestId,
         outcome: attempt.outcome,
-        outcomeSummary: attempt.outcomeSummary,
-        outcomeReason: attempt.outcomeReason,
+        outcomeSummary: attempt.outcomeSummary
+          ? redact(attempt.outcomeSummary)
+          : undefined,
+        outcomeReason: attempt.outcomeReason
+          ? redact(attempt.outcomeReason)
+          : undefined,
         inputTokens: attempt.inputTokens,
         outputTokens: attempt.outputTokens,
       })),
@@ -708,7 +1003,7 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
       "",
       "## Cursor 요약",
       "",
-      data.cursorSummary || "요약 없음.",
+      data.cursorSummary ? redact(data.cursorSummary) : "요약 없음.",
       "",
       "## 변경 파일",
       "",
@@ -716,9 +1011,12 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
       "",
       "## 독립 검증",
       "",
-      ...(data.verification?.map((result) =>
+      ...(data.verification?.flatMap((result) => [
         `- ${result.status.toUpperCase()}: \`${result.command}\` (${result.durationMs}ms)`,
-      ) ?? ["- 실행되지 않음"]),
+        ...(result.output
+          ? redact(result.output).split("\n").map((line) => `    ${line}`)
+          : []),
+      ]) ?? ["- 실행되지 않음"]),
       ...(data.attempts ? [
         "",
         "## 시도",
@@ -733,7 +1031,7 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
         "",
         ...data.assessment.reasons.map((reason) => `- ${reason}`),
       ] : []),
-      ...(data.error ? ["", "## 오류", "", data.error] : []),
+      ...(data.error ? ["", "## 오류", "", redact(data.error)] : []),
       "",
     ];
     await writeFile(reportPath, lines.join("\n"), { encoding: "utf8", mode: 0o600 });
@@ -741,6 +1039,7 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
   }
 
   async cleanup(prepared: PreparedWorktree, repository: RepositoryConfig): Promise<void> {
+    await this.#assertPreparedWorktree(prepared);
     await git(repository.root, "worktree", "remove", prepared.worktree);
     await git(repository.root, "branch", "-D", prepared.localBranch);
   }
@@ -749,14 +1048,22 @@ export class RealWorkflowAdapter implements WorkflowAdapter {
     const active = this.#activeRuns.get(attempt.id);
     if (active) {
       await active.cancel();
+      await active.wait();
       return;
     }
     if (attempt.cursorRunId) {
-      await Agent.cancelRun(attempt.cursorRunId, {
+      const options = {
         runtime: "local",
         ...(attempt.worktree ? { cwd: attempt.worktree } : {}),
         store: this.#cursorStore,
-      });
+      } as const;
+      const current = await Agent.getRun(attempt.cursorRunId, options);
+      if (current.status !== "running") return;
+      await Agent.cancelRun(attempt.cursorRunId, options);
+      const persisted = await Agent.getRun(attempt.cursorRunId, options);
+      if (persisted.status === "running") {
+        throw new Error(`Cursor run is still active after cancellation: ${attempt.cursorRunId}`);
+      }
     }
   }
 }

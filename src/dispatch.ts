@@ -1,7 +1,7 @@
 import path from "node:path";
 import { parse } from "yaml";
 import type { RepositoryConfig, RuntimePaths } from "./config.js";
-import { computeContextDigest, git, githubOriginSlug } from "./git.js";
+import { assertGitHubRemote, computeContextDigest, git } from "./git.js";
 import type { CreateJobInput, Job } from "./state.js";
 import { assertApprovedTask, loadTaskFile, parseTask, type ApprovedTask } from "./task.js";
 
@@ -33,14 +33,11 @@ export async function resolveCommittedTask(
   specHash: string,
 ): Promise<ResolvedCommittedTask> {
   const taskFile = path.join(paths.tasksDir, repositoryAlias, `${taskId}.yaml`);
-  const task = await loadTaskFile(taskFile);
+  const task = await loadTaskFile(taskFile, paths.projectRoot);
   if (task.id !== taskId || task.repository !== repositoryAlias) {
     throw new Error("Task identity does not match the request");
   }
-  const actualOrigin = githubOriginSlug(await git(repository.root, "remote", "get-url", "origin"));
-  if (actualOrigin !== repository.origin) {
-    throw new Error("Registered repository origin no longer matches its Git remote");
-  }
+  await assertGitHubRemote(repository.root, repository.origin);
   assertApprovedTask(task, specVersion, specHash, { origin: repository.origin });
   await git(repository.root, "cat-file", "-e", `${task.target.base_sha}^{commit}`);
   const contextDigest = await computeContextDigest(
@@ -81,13 +78,8 @@ export async function loadJobTask(
   repository: RepositoryConfig,
   job: JobTaskSource,
 ): Promise<ApprovedTask> {
-  const actualOrigin = githubOriginSlug(await git(
-    repository.root,
-    "remote",
-    "get-url",
-    "origin",
-  ));
-  if (actualOrigin !== repository.origin || actualOrigin !== job.targetOrigin) {
+  await assertGitHubRemote(repository.root, repository.origin);
+  if (repository.origin !== job.targetOrigin) {
     throw new Error("STALE_SPEC: runtime repository origin does not match the queued target");
   }
   const relativeTask = path.join("tasks", job.repositoryAlias, `${job.taskId}.yaml`);

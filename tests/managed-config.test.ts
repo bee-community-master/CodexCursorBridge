@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import process from "node:process";
 import {
   removeManagedRegistrationBlocks,
   upsertManagedMcpBlock,
@@ -11,6 +12,7 @@ describe("managed Codex config", () => {
     const twice = upsertManagedMcpBlock(once, "/second/clone");
 
     expect(twice).toContain("[mcp_servers.cursor_bridge]");
+    expect(twice).toContain(`command = "${process.execPath}"`);
     expect(twice).toContain('args = ["/second/clone/dist/mcp.js"]');
     expect(twice).toContain('cwd = "/second/clone"');
     expect(twice).toContain('CURSOR_BRIDGE_ROOT = "/second/clone"');
@@ -37,5 +39,16 @@ describe("managed Codex config", () => {
     expect(removeManagedRegistrationBlocks('model = "x"\n')).toBe('model = "x"\n');
     expect(() => removeManagedRegistrationBlocks("# BEGIN cursor-bridge managed main MCP\n")).toThrow(/Malformed/);
     expect(upsertManagedMcpBlock("", "/tmp/bridge")).toMatch(/^# BEGIN/);
+  });
+
+  it("escapes control characters in clone paths instead of injecting TOML entries", () => {
+    const rendered = upsertManagedMcpBlock(
+      "",
+      "/tmp/bridge\"\nmodel = \"injected",
+    );
+
+    expect(rendered).not.toContain('\nmodel = "injected');
+    expect(rendered).toContain("\\nmodel =");
+    expect(rendered).toContain('\\"injected');
   });
 });

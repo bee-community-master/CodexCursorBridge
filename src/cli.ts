@@ -3,8 +3,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bootstrap, uninstall } from "./bootstrap.js";
 import { addRepository, loadMachineConfig, runtimePaths, saveMachineConfig } from "./config.js";
-import { computeContextDigest, git, githubOriginSlug, runFile } from "./git.js";
+import {
+  assertGitHubRemote,
+  computeContextDigest,
+  git,
+  githubOriginSlug,
+  runFile,
+} from "./git.js";
 import { readCursorApiKey } from "./keychain.js";
+import { safeErrorMessage } from "./redaction.js";
 import { JobStore } from "./state.js";
 import { approveTaskFile, loadTaskFile } from "./task.js";
 
@@ -23,6 +30,7 @@ async function addRepo(args: string[]): Promise<void> {
   if (await git(root, "rev-parse", "--is-inside-work-tree") !== "true") throw new Error("Path is not a Git repository");
   const originUrl = await git(root, "remote", "get-url", "origin");
   const origin = githubOriginSlug(originUrl);
+  await assertGitHubRemote(root, origin);
   let defaultBranch: string;
   try {
     defaultBranch = (await git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")).replace(/^origin\//, "");
@@ -44,16 +52,14 @@ async function approve(args: string[]): Promise<void> {
   const repository = config.repositories[alias];
   if (!repository) throw new Error(`Repository alias is not registered: ${alias}`);
   const taskFile = path.join(paths.tasksDir, alias, `${taskId}.yaml`);
-  const draft = await loadTaskFile(taskFile);
+  const draft = await loadTaskFile(taskFile, paths.projectRoot);
   if (draft.id !== taskId || draft.repository !== alias) {
     throw new Error("Task identity does not match the approval request");
   }
-  const actualOrigin = githubOriginSlug(await git(repository.root, "remote", "get-url", "origin"));
-  if (actualOrigin !== repository.origin) {
-    throw new Error("Registered repository origin no longer matches its Git remote");
-  }
+  await assertGitHubRemote(repository.root, repository.origin);
   await git(repository.root, "fetch", "--prune", "origin");
   let baseRef = repository.defaultBranch;
+  let destinationRef = repository.defaultBranch;
   let baseSha: string;
   if (draft.pull_request.mode === "existing_pr") {
     const output = await runFile("gh", [
@@ -63,19 +69,23 @@ async function approve(args: string[]): Promise<void> {
       "--repo",
       repository.origin,
       "--json",
-      "state,headRefName,headRefOid,headRepository",
+      "state,isDraft,baseRefName,headRefName,headRefOid,headRepository",
     ]);
     const info = JSON.parse(output.stdout) as {
       state: string;
+      isDraft: boolean;
+      baseRefName: string;
       headRefName: string;
       headRefOid: string;
       headRepository: { nameWithOwner: string };
     };
     if (info.state !== "OPEN") throw new Error("Existing pull request is not open");
+    if (!info.isDraft) throw new Error("Existing pull request must be a draft");
     if (info.headRepository.nameWithOwner !== repository.origin) {
       throw new Error("Existing pull request head must be in the registered repository");
     }
     baseRef = info.headRefName;
+    destinationRef = info.baseRefName;
     baseSha = info.headRefOid;
   } else {
     baseSha = await git(repository.root, "rev-parse", `origin/${baseRef}`);
@@ -88,9 +98,10 @@ async function approve(args: string[]): Promise<void> {
   const task = await approveTaskFile(taskFile, {
     origin: repository.origin,
     baseRef,
+    destinationRef,
     baseSha,
     contextDigest,
-  });
+  }, paths.projectRoot);
   process.stdout.write(`${task.id} approved at v${task.spec_version}: ${task.spec_hash}\nCommit this Task file before dispatch.\n`);
 }
 
@@ -124,6 +135,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`${safeErrorMessage(error)}\n`);
   process.exitCode = 1;
 });

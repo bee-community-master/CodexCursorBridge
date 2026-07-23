@@ -1,7 +1,14 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CURRENT_POLICY_VERSION,
   approveTaskFile,
@@ -39,6 +46,7 @@ const task = {
 const approval = {
   origin: "owner/demo",
   baseRef: "main",
+  destinationRef: "release",
   baseSha: "a".repeat(40),
   contextDigest: `sha256:${"b".repeat(64)}`,
   approvedAt: "2026-07-23T00:00:00.000Z",
@@ -55,6 +63,7 @@ describe("task contract", () => {
       target: {
         origin: approval.origin,
         base_ref: approval.baseRef,
+        destination_ref: approval.destinationRef,
         base_sha: approval.baseSha,
         context_digest: approval.contextDigest,
       },
@@ -75,6 +84,30 @@ describe("task contract", () => {
     expect(first).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
+  it("does not make approval hashes depend on the machine locale comparator", () => {
+    const verification = {
+      commands: [{
+        command: "tool",
+        args: [] as string[],
+        env: { ZED: "1", ALPHA: "2" },
+        timeout_seconds: 900,
+      }],
+    };
+    const baseline = computeVerificationProfileHash(verification);
+    const localeCompare = vi.spyOn(String.prototype, "localeCompare")
+      .mockImplementation(function reverse(this: string, other) {
+        const left = String(this);
+        const right = String(other);
+        return left < right ? 1 : left > right ? -1 : 0;
+      });
+
+    try {
+      expect(computeVerificationProfileHash(verification)).toBe(baseline);
+    } finally {
+      localeCompare.mockRestore();
+    }
+  });
+
   it("requires a PR number for existing_pr", () => {
     expect(() => parseTask({ ...task, pull_request: { mode: "existing_pr" } })).toThrow();
   });
@@ -92,6 +125,7 @@ describe("task contract", () => {
     expect(approved.target).toEqual({
       origin: approval.origin,
       base_ref: approval.baseRef,
+      destination_ref: approval.destinationRef,
       base_sha: approval.baseSha,
       context_digest: approval.contextDigest,
     });
@@ -106,6 +140,46 @@ describe("task contract", () => {
     await expect(approveTaskFile(file, approval)).rejects.toThrow(/not draft/);
   });
 
+  it("rejects a symlinked Task file instead of following machine-local content", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "cursor-task-link-"));
+    const target = path.join(dir, "outside.yaml");
+    const file = path.join(dir, "TASK-001.yaml");
+    const { stringify } = await import("yaml");
+    await writeFile(target, stringify(task), "utf8");
+    await symlink(target, file);
+
+    await expect(approveTaskFile(file, approval)).rejects.toThrow(/plain|symlink/i);
+  });
+
+  it("rejects a Task reached through a symlinked directory below the project root", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cursor-task-parent-link-"));
+    const outside = await mkdtemp(path.join(tmpdir(), "cursor-task-outside-"));
+    const tasks = path.join(root, "tasks");
+    const linkedRepository = path.join(tasks, "demo");
+    const file = path.join(linkedRepository, "TASK-001.yaml");
+    const { stringify } = await import("yaml");
+    await mkdir(tasks);
+    await writeFile(path.join(outside, "TASK-001.yaml"), stringify(task), "utf8");
+    await symlink(outside, linkedRepository);
+
+    await expect(approveTaskFile(file, approval, root)).rejects.toThrow(/linked|symlink/i);
+    expect(await readFile(path.join(outside, "TASK-001.yaml"), "utf8")).toContain("status: draft");
+  });
+
+  it("atomically replaces an approved Task without modifying another hard link", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "cursor-task-link-"));
+    const target = path.join(dir, "outside.yaml");
+    const file = path.join(dir, "TASK-001.yaml");
+    const { stringify } = await import("yaml");
+    await writeFile(target, stringify(task), "utf8");
+    await link(target, file);
+
+    await approveTaskFile(file, approval);
+
+    expect(await readFile(file, "utf8")).toContain("status: approved");
+    expect(await readFile(target, "utf8")).toContain("status: draft");
+  });
+
   it("rejects draft and stale approved specs", () => {
     const unhashed = {
       ...task,
@@ -115,6 +189,7 @@ describe("task contract", () => {
       target: {
         origin: approval.origin,
         base_ref: approval.baseRef,
+        destination_ref: approval.destinationRef,
         base_sha: approval.baseSha,
         context_digest: approval.contextDigest,
       },
@@ -160,16 +235,64 @@ describe("task contract", () => {
     })).toThrow(/secret/i);
   });
 
-  it("rejects verification overrides for sandbox control variables", () => {
+  it.each(["HOME", "CI", "LANG", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"])(
+    "rejects verification overrides for sandbox control variable %s",
+    (name) => {
+      expect(() => parseTask({
+        ...task,
+        verification: {
+          commands: [{
+            command: "pnpm",
+            args: ["test"],
+            env: { [name]: "/tmp/untrusted-value" },
+          }],
+        },
+      })).toThrow(/reserved/i);
+    },
+  );
+
+  it("rejects path patterns that cannot round-trip as literal macOS Git paths", () => {
     expect(() => parseTask({
+      ...task,
+      allowed_paths: ["src\\**"],
+    })).toThrow(/path/i);
+  });
+
+  it.each([
+    {
+      ...task,
+      forbidden_path: [".env"],
+    },
+    {
+      ...task,
+      limits: {
+        ...task.limits,
+        max_diff_line: 100,
+      },
+    },
+    {
       ...task,
       verification: {
         commands: [{
           command: "pnpm",
           args: ["test"],
-          env: { HOME: "/tmp/untrusted-home" },
+          timeout_second: 30,
         }],
       },
-    })).toThrow(/reserved/i);
+    },
+  ])("rejects unknown Task fields instead of discarding a misspelled constraint", (candidate) => {
+    expect(() => parseTask(candidate)).toThrow(/unrecognized|unknown/i);
   });
+
+  it.each(["-f", "pnpm test", ".hidden-tool"])(
+    "rejects an unsafe verification executable name: %s",
+    (command) => {
+      expect(() => parseTask({
+        ...task,
+        verification: {
+          commands: [{ command, args: [] }],
+        },
+      })).toThrow(/command|executable/i);
+    },
+  );
 });

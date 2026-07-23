@@ -13,18 +13,18 @@ The main Codex agent calls the narrow Cursor Bridge MCP tools directly. A launch
 2. Copy `examples/TASK-template.yaml` to `tasks/<alias>/TASK-<ID>.yaml`.
 3. Fill every acceptance, scope, verification, stop, limit, and PR-mode field. Never place secrets in a Task.
 4. Keep `status: draft` while discussing it.
-5. Run `pnpm task:approve -- --repository <alias> --task TASK-<ID>` only after explicit approval. Approval binds the target origin, base SHA, context digest, policy version, and verification profile.
+5. Run `pnpm task:approve -- --repository <alias> --task TASK-<ID>` only after explicit approval. Approval binds the target origin, base SHA, PR destination branch, context digest, policy version, and verification profile.
 6. Commit the approved Task before dispatch.
 
 ## Dispatch
 
-Call `cursor_start_task` directly with only the repository alias, Task ID, spec version, and spec hash. Call it exactly once for an approved spec. It returns a job ID without waiting for Cursor to finish. Report that job ID and the initial status to the user; do not continuously poll unless the user asks to wait or check progress.
+Call `cursor_start_task` directly with only the repository alias, Task ID, spec version, and spec hash. Normally call it once for an approved spec. It returns a job ID without waiting for Cursor to finish. If the response preserves a job ID but explicitly warns that the supervisor wake failed, retry only the same approved identity once. Report the job ID and initial status to the user; do not continuously poll unless the user asks to wait or check progress.
 
 Do not pass conversation history, a free-form prompt, shell commands, or repository paths through MCP. The committed and hash-locked Task packet is the only implementation contract.
 
-Use `cursor_get_task` for an explicit status check, `cursor_cancel_task` only on explicit cancellation, and `cursor_get_report` after a terminal state. Cancellation is confirmed asynchronously; `CANCEL_REQUESTED` is not yet `CANCELLED`.
+Use `cursor_get_task` for an explicit status check, `cursor_cancel_task` only on explicit cancellation, and `cursor_get_report` after a terminal state. Cancellation is confirmed asynchronously; `CANCEL_REQUESTED` is not yet `CANCELLED`. Once a job reaches `PUBLISHING`, publication is the point of no return: do not claim it was cancelled, and let the Bridge finish remote readback and delivery reconciliation.
 
-Successful delivery is `DELIVERED_REVIEW_REQUIRED` with a Draft PR, final tree hash, independent verification, and an attestation artifact. It is ready for Codex/human review, not automatically ready to merge.
+Successful delivery is `DELIVERED_REVIEW_REQUIRED` with a Draft PR, final tree hash, independent verification, and an attestation artifact. Existing PR mode also accepts only an open Draft PR in the registered repository. Delivery is ready for Codex/human review, not automatically ready to merge.
 
 ## Stop conditions
 

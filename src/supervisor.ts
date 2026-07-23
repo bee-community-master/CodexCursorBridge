@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { runtimePaths } from "./config.js";
+import { safeErrorMessage } from "./redaction.js";
 import { JobStore } from "./state.js";
 import { processClaim } from "./worker.js";
 
@@ -54,6 +55,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+  process.stderr.write(`${safeErrorMessage(error)}\n`);
   process.exitCode = 1;
 });

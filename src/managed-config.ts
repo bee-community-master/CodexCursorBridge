@@ -1,4 +1,5 @@
 import path from "node:path";
+import process from "node:process";
 
 const MCP_BEGIN = "# BEGIN cursor-bridge managed main MCP";
 const MCP_END = "# END cursor-bridge managed main MCP";
@@ -6,7 +7,28 @@ const LEGACY_AGENT_BEGIN = "# BEGIN cursor-bridge managed CURSOR agent";
 const LEGACY_AGENT_END = "# END cursor-bridge managed CURSOR agent";
 
 function escapeToml(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+  const escapedControls: Record<string, string> = {
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+  };
+  let escaped = "";
+  for (const character of value) {
+    if (character === "\\") {
+      escaped += "\\\\";
+    } else if (character === '"') {
+      escaped += '\\"';
+    } else {
+      const codePoint = character.codePointAt(0)!;
+      escaped += codePoint <= 0x1f || codePoint === 0x7f
+        ? escapedControls[character]
+          ?? `\\u${codePoint.toString(16).padStart(4, "0")}`
+        : character;
+    }
+  }
+  return escaped;
 }
 
 function removeBlock(content: string, begin: string, end: string): string {
@@ -24,7 +46,7 @@ function mcpBlock(projectRoot: string): string {
   const mcpScript = path.join(root, "dist", "mcp.js");
   return `${MCP_BEGIN}
 [mcp_servers.cursor_bridge]
-command = "node"
+command = "${escapeToml(process.execPath)}"
 args = ["${escapeToml(mcpScript)}"]
 cwd = "${escapeToml(root)}"
 env = { CURSOR_BRIDGE_ROOT = "${escapeToml(root)}" }

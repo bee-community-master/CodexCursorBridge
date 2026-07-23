@@ -64,6 +64,7 @@ describe("committed task dispatch boundary", () => {
     const approved = await approveTaskFile(taskFile, {
       origin: "owner/demo",
       baseRef: "main",
+      destinationRef: "main",
       baseSha,
       contextDigest,
       approvedAt: "2026-07-23T00:00:00.000Z",
@@ -98,7 +99,7 @@ describe("committed task dispatch boundary", () => {
       specHash: approved.spec_hash,
       targetOrigin: "owner/demo",
       targetBaseSha: baseSha,
-      policyVersion: 2,
+      policyVersion: 3,
       maxAttempts: 2,
     });
     expect(resolved.createJobInput.taskCommitSha).toMatch(/^[a-f0-9]{40,64}$/);
@@ -110,5 +111,19 @@ describe("committed task dispatch boundary", () => {
       id: "job",
     });
     expect(restored).toEqual(approved);
+
+    await exec("git", [
+      "-C",
+      target,
+      "remote",
+      "set-url",
+      "--push",
+      "origin",
+      "git@github.com:attacker/demo.git",
+    ]);
+    await expect(loadJobTask(paths, repository, {
+      ...resolved.createJobInput,
+      id: "job",
+    })).rejects.toThrow(/push remote/i);
   });
 });

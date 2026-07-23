@@ -1,16 +1,40 @@
-import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { lstat, open, rename, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
+import { assertRelativeRepoPath } from "./paths.js";
 
-export const CURRENT_POLICY_VERSION = 2;
+export const CURRENT_POLICY_VERSION = 3;
 const EMPTY_HASH = `sha256:${"0".repeat(64)}`;
 const hashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const gitObjectSchema = z.string().regex(/^[a-f0-9]{40,64}$/);
+const reservedVerificationEnvironment = new Set([
+  "CI",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "NODE_OPTIONS",
+  "OLDPWD",
+  "PATH",
+  "PWD",
+  "SHELL",
+  "SSH_AUTH_SOCK",
+  "TEMP",
+  "TEMPDIR",
+  "TMP",
+  "TMPDIR",
+]);
 
 const relativePath = z.string().min(1).refine((value) => {
-  return !value.startsWith("/") && !value.split("/").includes("..");
-}, "path must be repository-relative and may not traverse upward");
+  try {
+    assertRelativeRepoPath(value);
+    return true;
+  } catch {
+    return false;
+  }
+}, "path must be a safe repository-relative macOS Git path or pattern");
 
 const safeVerificationEnv = z.record(z.string().regex(/^[A-Z][A-Z0-9_]*$/), z.string())
   .superRefine((env, context) => {
@@ -24,7 +48,8 @@ const safeVerificationEnv = z.record(z.string().regex(/^[A-Z][A-Z0-9_]*$/), z.st
       });
     }
     const reservedNames = Object.keys(env).filter((name) =>
-      ["HOME", "TMPDIR", "PATH", "SHELL", "SSH_AUTH_SOCK", "NODE_OPTIONS"].includes(name),
+      reservedVerificationEnvironment.has(name)
+      || /^(?:DYLD|LD)_/.test(name),
     );
     if (reservedNames.length > 0) {
       context.addIssue({
@@ -35,20 +60,24 @@ const safeVerificationEnv = z.record(z.string().regex(/^[A-Z][A-Z0-9_]*$/), z.st
   });
 
 const verificationCommandSchema = z.object({
-  command: z.string().min(1).refine((value) => !value.includes("/"), "command must be resolved through PATH"),
+  command: z.string()
+    .regex(
+      /^[A-Za-z0-9][A-Za-z0-9._+-]*$/,
+      "verification command must be a safe executable name resolved through PATH",
+    ),
   args: z.array(z.string()).default([]),
   env: safeVerificationEnv.optional(),
   timeout_seconds: z.number().int().positive().max(3600).default(900),
-});
+}).strict();
 
 const verificationSchema = z.object({
   commands: z.array(verificationCommandSchema).min(1),
   profile_hash: hashSchema.optional(),
-});
+}).strict();
 
 const pullRequestSchema = z.discriminatedUnion("mode", [
-  z.object({ mode: z.literal("new_draft") }),
-  z.object({ mode: z.literal("existing_pr"), number: z.number().int().positive() }),
+  z.object({ mode: z.literal("new_draft") }).strict(),
+  z.object({ mode: z.literal("existing_pr"), number: z.number().int().positive() }).strict(),
 ]);
 
 const taskShape = {
@@ -70,7 +99,7 @@ const taskShape = {
     max_diff_lines: z.number().int().positive().max(100_000),
     allow_test_deletion: z.boolean().default(false),
     max_repair_attempts: z.number().int().min(0).max(2).default(1),
-  }),
+  }).strict(),
   stop_conditions: z.array(z.string()).default([]),
   pull_request: pullRequestSchema,
 };
@@ -83,14 +112,15 @@ const draftTaskSchema = z.object({
   target: z.object({
     origin: z.string(),
     base_ref: z.string(),
+    destination_ref: z.string(),
     base_sha: gitObjectSchema,
     context_digest: hashSchema,
-  }).optional(),
+  }).strict().optional(),
   approval: z.object({
     approved_at: z.string().datetime(),
     approved_by: z.string().min(1),
-  }).optional(),
-});
+  }).strict().optional(),
+}).strict();
 
 const approvedTaskSchema = z.object({
   ...taskShape,
@@ -100,15 +130,16 @@ const approvedTaskSchema = z.object({
   target: z.object({
     origin: z.string().regex(/^[^/]+\/[^/]+$/),
     base_ref: z.string().min(1),
+    destination_ref: z.string().min(1),
     base_sha: gitObjectSchema,
     context_digest: hashSchema,
-  }),
+  }).strict(),
   approval: z.object({
     approved_at: z.string().datetime(),
     approved_by: z.string().min(1),
-  }),
-  verification: verificationSchema.extend({ profile_hash: hashSchema }),
-});
+  }).strict(),
+  verification: verificationSchema.extend({ profile_hash: hashSchema }).strict(),
+}).strict();
 
 export const taskSchema = z.discriminatedUnion("status", [draftTaskSchema, approvedTaskSchema]);
 
@@ -119,6 +150,7 @@ export type VerificationCommand = z.infer<typeof verificationCommandSchema>;
 export interface TaskApprovalContext {
   origin: string;
   baseRef: string;
+  destinationRef: string;
   baseSha: string;
   contextDigest: string;
   approvedAt?: string;
@@ -130,7 +162,7 @@ function canonicalize(value: unknown): unknown {
   if (value !== null && typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>)
       .filter(([key]) => key !== "spec_hash")
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([key, item]) => [key, canonicalize(item)]);
     return Object.fromEntries(entries);
   }
@@ -163,12 +195,59 @@ export function computeSpecHash(input: unknown): string {
   return sha256(parsed);
 }
 
-export async function loadTaskFile(file: string): Promise<Task> {
-  return parseTask(parse(await readFile(file, "utf8")));
+async function assertUnlinkedPathBelowRoot(file: string, trustedRoot: string): Promise<void> {
+  const root = path.resolve(trustedRoot);
+  const target = path.resolve(file);
+  const relative = path.relative(root, target);
+  if (
+    relative === ""
+    || relative === ".."
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)
+  ) {
+    throw new Error("Task file must be located below the trusted project root");
+  }
+
+  let current = root;
+  for (const component of relative.split(path.sep).slice(0, -1)) {
+    current = path.join(current, component);
+    const metadata = await lstat(current);
+    if (metadata.isSymbolicLink()) {
+      throw new Error("Task file path must not contain linked directories");
+    }
+    if (!metadata.isDirectory()) {
+      throw new Error("Task file parent must be a directory");
+    }
+  }
 }
 
-export async function approveTaskFile(file: string, context: TaskApprovalContext): Promise<ApprovedTask> {
-  const current = await loadTaskFile(file);
+export async function loadTaskFile(file: string, trustedRoot?: string): Promise<Task> {
+  if (trustedRoot) await assertUnlinkedPathBelowRoot(file, trustedRoot);
+  let handle;
+  try {
+    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new Error("Task file must be a plain file, not a symbolic link", { cause: error });
+    }
+    throw error;
+  }
+
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) throw new Error("Task file must be a plain file");
+    return parseTask(parse(await handle.readFile("utf8")));
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function approveTaskFile(
+  file: string,
+  context: TaskApprovalContext,
+  trustedRoot?: string,
+): Promise<ApprovedTask> {
+  const current = await loadTaskFile(file, trustedRoot);
   if (current.status !== "draft") throw new Error(`Task ${current.id} is not draft`);
   const verification = {
     ...current.verification,
@@ -182,6 +261,7 @@ export async function approveTaskFile(file: string, context: TaskApprovalContext
     target: {
       origin: context.origin,
       base_ref: context.baseRef,
+      destination_ref: context.destinationRef,
       base_sha: context.baseSha,
       context_digest: context.contextDigest,
     },
@@ -192,7 +272,18 @@ export async function approveTaskFile(file: string, context: TaskApprovalContext
     verification,
   });
   const withHash = approvedTaskSchema.parse({ ...approved, spec_hash: computeSpecHash(approved) });
-  await writeFile(file, stringify(withHash, { lineWidth: 100 }), "utf8");
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, stringify(withHash, { lineWidth: 100 }), {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    await rename(temporary, file);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
   return withHash;
 }
 

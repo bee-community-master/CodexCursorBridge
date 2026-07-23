@@ -129,6 +129,7 @@ export interface Attempt {
   cursorRequestId?: string;
   worktree?: string;
   baseSha?: string;
+  gitConfigDigest?: string;
   headSha?: string;
   treeHash?: string;
   outcome?: "completed" | "blocked" | "needs_input";
@@ -177,6 +178,17 @@ export interface JobMetrics {
   cancelledJobs: number;
   firstAttemptDeliveryRate: number;
 }
+
+export interface DeliveryCompletion {
+  prUrl: string;
+  headSha: string;
+  treeHash: string;
+  attestationPath: string;
+  reportPath: string;
+  deliveredAt: string;
+}
+
+export type PublicationRecord = Pick<DeliveryCompletion, "prUrl" | "headSha" | "treeHash">;
 
 function optionalString(row: Record<string, unknown>, key: string): string | undefined {
   return typeof row[key] === "string" ? String(row[key]) : undefined;
@@ -245,6 +257,7 @@ function rowToAttempt(row: Record<string, unknown>): Attempt {
   const cursorRequestId = optionalString(row, "cursor_request_id");
   const worktree = optionalString(row, "worktree");
   const baseSha = optionalString(row, "base_sha");
+  const gitConfigDigest = optionalString(row, "git_config_digest");
   const headSha = optionalString(row, "head_sha");
   const treeHash = optionalString(row, "tree_hash");
   const outcome = optionalString(row, "outcome") as Attempt["outcome"];
@@ -268,6 +281,7 @@ function rowToAttempt(row: Record<string, unknown>): Attempt {
     ...(cursorRequestId ? { cursorRequestId } : {}),
     ...(worktree ? { worktree } : {}),
     ...(baseSha ? { baseSha } : {}),
+    ...(gitConfigDigest ? { gitConfigDigest } : {}),
     ...(headSha ? { headSha } : {}),
     ...(treeHash ? { treeHash } : {}),
     ...(outcome ? { outcome } : {}),
@@ -310,15 +324,31 @@ export class JobStore {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     chmodSync(directory, 0o700);
     this.#database = new DatabaseSync(file);
-    this.#database.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
-    this.#migrate();
-    chmodSync(file, 0o600);
-    for (const suffix of ["-wal", "-shm"]) {
-      if (existsSync(`${file}${suffix}`)) chmodSync(`${file}${suffix}`, 0o600);
+    try {
+      this.#database.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+      this.#migrate();
+      chmodSync(file, 0o600);
+      for (const suffix of ["-wal", "-shm"]) {
+        if (existsSync(`${file}${suffix}`)) chmodSync(`${file}${suffix}`, 0o600);
+      }
+    } catch (error) {
+      try {
+        this.#database.close();
+      } catch {
+        // Preserve the migration failure if SQLite also fails to close.
+      }
+      throw error;
     }
   }
 
   #migrate(): void {
+    const versionRow = this.#database.prepare("PRAGMA user_version").get() as Record<string, unknown>;
+    const currentVersion = Number(versionRow.user_version);
+    if (currentVersion > STATE_SCHEMA_VERSION) {
+      throw new Error(
+        `Database uses newer schema version ${currentVersion}; this bridge supports ${STATE_SCHEMA_VERSION}`,
+      );
+    }
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       this.#database.exec(`
@@ -366,7 +396,7 @@ export class JobStore {
           lease_expires_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           cursor_agent_id TEXT, cursor_run_id TEXT, cursor_request_id TEXT,
-          worktree TEXT, base_sha TEXT, head_sha TEXT, tree_hash TEXT,
+          worktree TEXT, base_sha TEXT, git_config_digest TEXT, head_sha TEXT, tree_hash TEXT,
           outcome TEXT, outcome_summary TEXT, outcome_reason TEXT, error_message TEXT,
           input_tokens INTEGER, output_tokens INTEGER,
           UNIQUE(job_id, ordinal), FOREIGN KEY(job_id) REFERENCES jobs(id)
@@ -403,6 +433,9 @@ export class JobStore {
       );
       if (!attemptColumns.has("outcome_summary")) {
         this.#database.exec("ALTER TABLE attempts ADD COLUMN outcome_summary TEXT");
+      }
+      if (!attemptColumns.has("git_config_digest")) {
+        this.#database.exec("ALTER TABLE attempts ADD COLUMN git_config_digest TEXT");
       }
       this.#database.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`);
       this.#database.exec("COMMIT");
@@ -453,7 +486,6 @@ export class JobStore {
     const parsed = rowToJob(job);
     if (
       parsed.specVersion !== input.specVersion
-      || parsed.taskCommitSha !== input.taskCommitSha
       || parsed.taskBlobSha !== input.taskBlobSha
       || parsed.targetOrigin !== input.targetOrigin
       || parsed.targetBaseSha !== input.targetBaseSha
@@ -484,6 +516,32 @@ export class JobStore {
     return (this.#database.prepare(
       "SELECT * FROM attempts WHERE job_id = ? ORDER BY ordinal",
     ).all(jobId) as Array<Record<string, unknown>>).map(rowToAttempt);
+  }
+
+  assertActiveAttempt(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    expectedStatus: AttemptStatus,
+  ): Attempt {
+    const expectedJobStatus = this.#jobStatusForAttempt(expectedStatus);
+    if (!expectedJobStatus || terminalJobStatuses.has(expectedJobStatus)) {
+      throw new Error(`Attempt status is not active: ${expectedStatus}`);
+    }
+    const row = this.#database.prepare(`
+      SELECT a.* FROM attempts a
+      JOIN jobs j ON j.id = a.job_id
+      WHERE a.id = ? AND a.job_id = ? AND a.worker_token = ? AND a.status = ?
+        AND j.current_attempt_id = a.id AND j.status = ?
+    `).get(
+      attemptId,
+      jobId,
+      workerToken,
+      expectedStatus,
+      expectedJobStatus,
+    ) as Record<string, unknown> | undefined;
+    if (!row) throw new Error(`Active attempt lease was lost: ${attemptId}`);
+    return rowToAttempt(row);
   }
 
   claimNext(workerToken: string, leaseMs: number, now = new Date()): ClaimedWork | undefined {
@@ -580,7 +638,11 @@ export class JobStore {
       }
       const job = this.get(attempt.jobId);
       if (!job) throw new Error(`Unknown job: ${attempt.jobId}`);
-      if (job.status === "CANCEL_REQUESTED" && next !== "CANCELLED") {
+      if (
+        job.status === "CANCEL_REQUESTED"
+        && next !== "CANCELLED"
+        && next !== attempt.status
+      ) {
         throw new Error(`Job cancellation is pending: ${job.id}`);
       }
       const timestamp = nowIso();
@@ -592,6 +654,7 @@ export class JobStore {
             cursor_run_id = COALESCE(?, cursor_run_id),
             cursor_request_id = COALESCE(?, cursor_request_id),
             worktree = COALESCE(?, worktree), base_sha = COALESCE(?, base_sha),
+            git_config_digest = COALESCE(?, git_config_digest),
             head_sha = COALESCE(?, head_sha), tree_hash = COALESCE(?, tree_hash),
             outcome = COALESCE(?, outcome), outcome_summary = COALESCE(?, outcome_summary),
             outcome_reason = COALESCE(?, outcome_reason),
@@ -607,6 +670,7 @@ export class JobStore {
         fields.cursorRequestId ?? null,
         fields.worktree ?? null,
         fields.baseSha ?? null,
+        fields.gitConfigDigest ?? null,
         fields.headSha ?? null,
         fields.treeHash ?? null,
         fields.outcome ?? null,
@@ -620,12 +684,21 @@ export class JobStore {
         ...expected,
       );
       if (result.changes !== 1) throw new Error(`Attempt state changed concurrently: ${attemptId}`);
-      const jobStatus = this.#jobStatusForAttempt(next);
+      const jobStatus = job.status === "CANCEL_REQUESTED"
+        ? undefined
+        : this.#jobStatusForAttempt(next);
       if (jobStatus) {
         const jobResult = this.#database.prepare(`
-          UPDATE jobs SET status = ?, updated_at = ?
+          UPDATE jobs SET status = ?, updated_at = ?,
+            error_message = COALESCE(?, error_message)
           WHERE id = ? AND current_attempt_id = ?
-        `).run(jobStatus, timestamp, attempt.jobId, attemptId);
+        `).run(
+          jobStatus,
+          timestamp,
+          fields.errorMessage ?? null,
+          attempt.jobId,
+          attemptId,
+        );
         if (jobResult.changes !== 1) {
           throw new Error(`Job attempt changed concurrently: ${attempt.jobId}`);
         }
@@ -664,30 +737,41 @@ export class JobStore {
     previousAttemptId: string,
     workerToken: string,
     leaseMs: number,
+    repairEvidence: string,
     now = new Date(),
   ): Attempt {
-    const job = this.get(jobId);
-    const previous = this.getAttempt(previousAttemptId);
-    if (!job || !previous) throw new Error("Cannot begin repair for an unknown job or attempt");
-    if (previous.workerToken !== workerToken) throw new Error("Attempt lease is not owned by this worker");
-    const ordinal = previous.ordinal + 1;
-    if (ordinal > job.maxAttempts) throw new Error(`Attempt limit exceeded for job ${job.id}`);
     const timestamp = nowIso(now);
     const attemptId = randomUUID();
     this.#database.exec("BEGIN IMMEDIATE");
     try {
+      const job = this.get(jobId);
+      const previous = this.getAttempt(previousAttemptId);
+      if (!job || !previous) throw new Error("Cannot begin repair for an unknown job or attempt");
+      if (previous.workerToken !== workerToken) {
+        throw new Error("Attempt lease is not owned by this worker");
+      }
+      if (job.status === "CANCEL_REQUESTED") {
+        throw new Error(`Job cancellation is pending: ${job.id}`);
+      }
+      if (job.status !== "VERIFYING" || job.currentAttemptId !== previous.id) {
+        throw new Error(`Job is not eligible for repair: ${job.id}`);
+      }
+      const ordinal = previous.ordinal + 1;
+      if (ordinal > job.maxAttempts) throw new Error(`Attempt limit exceeded for job ${job.id}`);
       const previousResult = this.#database.prepare(`
-        UPDATE attempts SET status = 'FAILED_REPAIRABLE', updated_at = ?
+        UPDATE attempts
+        SET status = 'FAILED_REPAIRABLE', updated_at = ?, error_message = ?
         WHERE id = ? AND worker_token = ? AND status = 'VERIFYING'
-      `).run(timestamp, previous.id, workerToken);
+      `).run(timestamp, repairEvidence, previous.id, workerToken);
       if (previousResult.changes !== 1) {
         throw new Error(`Previous repair attempt changed concurrently: ${previous.id}`);
       }
       this.#database.prepare(`
         INSERT INTO attempts (
           id, job_id, ordinal, status, worker_token, lease_expires_at,
-          heartbeat_at, created_at, updated_at, cursor_agent_id, worktree, base_sha
-        ) VALUES (?, ?, ?, 'REPAIRING', ?, ?, ?, ?, ?, ?, ?, ?)
+          heartbeat_at, created_at, updated_at, cursor_agent_id, worktree, base_sha,
+          git_config_digest, error_message
+        ) VALUES (?, ?, ?, 'REPAIRING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         attemptId,
         job.id,
@@ -700,10 +784,12 @@ export class JobStore {
         previous.cursorAgentId ?? null,
         previous.worktree ?? null,
         previous.baseSha ?? null,
+        previous.gitConfigDigest ?? null,
+        repairEvidence,
       );
       const jobResult = this.#database.prepare(`
         UPDATE jobs SET status = 'REPAIRING', current_attempt_id = ?, updated_at = ?
-        WHERE id = ? AND current_attempt_id = ?
+        WHERE id = ? AND current_attempt_id = ? AND status = 'VERIFYING'
       `).run(attemptId, timestamp, job.id, previous.id);
       if (jobResult.changes !== 1) throw new Error(`Job attempt changed concurrently: ${job.id}`);
       this.#recordEvent(job.id, attemptId, "REPAIR_ATTEMPT_STARTED", { ordinal }, timestamp);
@@ -715,13 +801,75 @@ export class JobStore {
     }
   }
 
-  requestCancellation(jobId: string): Job {
-    const job = this.get(jobId);
-    if (!job) throw new Error(`Unknown job: ${jobId}`);
-    if (terminalJobStatuses.has(job.status) || job.status === "CANCEL_REQUESTED") return job;
+  failStaleSpec(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    errorMessage: string,
+  ): Job {
     const timestamp = nowIso();
     this.#database.exec("BEGIN IMMEDIATE");
     try {
+      const attempt = this.getAttempt(attemptId);
+      const job = this.get(jobId);
+      if (
+        !attempt
+        || attempt.jobId !== jobId
+        || attempt.workerToken !== workerToken
+        || job?.currentAttemptId !== attemptId
+      ) {
+        throw new Error("Stale-spec failure does not own the active attempt lease");
+      }
+      const expectedJobStatus = this.#jobStatusForAttempt(attempt.status);
+      if (!expectedJobStatus || job.status !== expectedJobStatus) {
+        throw new Error(`Job is not active for stale-spec failure: ${jobId}`);
+      }
+      if (!allowedAttemptTransitions[attempt.status].has("FAILED")) {
+        throw new Error(`Attempt cannot fail stale spec from ${attempt.status}`);
+      }
+      const attemptResult = this.#database.prepare(`
+        UPDATE attempts SET status = 'FAILED', updated_at = ?, error_message = ?
+        WHERE id = ? AND worker_token = ? AND status = ?
+      `).run(timestamp, errorMessage, attemptId, workerToken, attempt.status);
+      if (attemptResult.changes !== 1) {
+        throw new Error("Stale-spec failure lost the active attempt lease");
+      }
+      const jobResult = this.#database.prepare(`
+        UPDATE jobs SET status = 'STALE_SPEC', updated_at = ?, error_message = ?
+        WHERE id = ? AND current_attempt_id = ? AND status = ?
+      `).run(timestamp, errorMessage, jobId, attemptId, expectedJobStatus);
+      if (jobResult.changes !== 1) {
+        throw new Error("Stale-spec failure lost the active job");
+      }
+      this.#recordEvent(jobId, attemptId, "ATTEMPT_TRANSITIONED", {
+        from: attempt.status,
+        to: "FAILED",
+      }, timestamp);
+      this.#recordEvent(jobId, attemptId, "JOB_TRANSITIONED", {
+        to: "STALE_SPEC",
+      }, timestamp);
+      this.#database.exec("COMMIT");
+      return this.get(jobId)!;
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  requestCancellation(jobId: string): Job {
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const job = this.get(jobId);
+      if (!job) throw new Error(`Unknown job: ${jobId}`);
+      if (
+        terminalJobStatuses.has(job.status)
+        || job.status === "CANCEL_REQUESTED"
+        || job.status === "PUBLISHING"
+      ) {
+        this.#database.exec("COMMIT");
+        return job;
+      }
+      const timestamp = nowIso();
       let result;
       if (job.status === "QUEUED") {
         result = this.#database.prepare(`
@@ -749,24 +897,162 @@ export class JobStore {
   }
 
   confirmCancellation(jobId: string, attemptId: string, workerToken: string): Job {
-    const attempt = this.getAttempt(attemptId);
-    if (!attempt || attempt.jobId !== jobId || attempt.workerToken !== workerToken) {
-      throw new Error("Cancellation confirmation does not own the active attempt");
-    }
-    const job = this.get(jobId);
-    if (!job || job.status !== "CANCEL_REQUESTED") throw new Error("Job has no pending cancellation");
     const timestamp = nowIso();
     this.#database.exec("BEGIN IMMEDIATE");
     try {
-      this.#database.prepare(`
+      const attempt = this.getAttempt(attemptId);
+      const job = this.get(jobId);
+      if (
+        !attempt
+        || attempt.jobId !== jobId
+        || attempt.workerToken !== workerToken
+        || job?.currentAttemptId !== attemptId
+      ) {
+        throw new Error("Cancellation confirmation does not own the active attempt lease");
+      }
+      if (job.status !== "CANCEL_REQUESTED") throw new Error("Job has no pending cancellation");
+      const attemptResult = this.#database.prepare(`
         UPDATE attempts SET status = 'CANCELLED', updated_at = ?
         WHERE id = ? AND worker_token = ?
+          AND status IN ('PREPARING', 'IMPLEMENTING', 'VERIFYING', 'REPAIRING', 'PUBLISHING')
       `).run(timestamp, attemptId, workerToken);
-      this.#database.prepare(`
+      if (attemptResult.changes !== 1) {
+        throw new Error("Cancellation confirmation lost the active attempt lease");
+      }
+      const jobResult = this.#database.prepare(`
         UPDATE jobs SET status = 'CANCELLED', updated_at = ?
-        WHERE id = ? AND status = 'CANCEL_REQUESTED'
-      `).run(timestamp, jobId);
+        WHERE id = ? AND status = 'CANCEL_REQUESTED' AND current_attempt_id = ?
+      `).run(timestamp, jobId, attemptId);
+      if (jobResult.changes !== 1) {
+        throw new Error("Cancellation confirmation lost the active job");
+      }
       this.#recordEvent(jobId, attemptId, "CANCELLATION_CONFIRMED", {}, timestamp);
+      this.#database.exec("COMMIT");
+      return this.get(jobId)!;
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  recordPublication(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    publication: PublicationRecord,
+  ): Job {
+    const timestamp = nowIso();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const attempt = this.assertActiveAttempt(
+        jobId,
+        attemptId,
+        workerToken,
+        "PUBLISHING",
+      );
+      if (!attempt.treeHash || attempt.treeHash !== publication.treeHash) {
+        throw new Error("Published tree does not match the active attempt");
+      }
+      const result = this.#database.prepare(`
+        UPDATE jobs
+        SET pr_url = ?, head_sha = ?, tree_hash = ?, updated_at = ?
+        WHERE id = ? AND status = 'PUBLISHING' AND current_attempt_id = ?
+      `).run(
+        publication.prUrl,
+        publication.headSha,
+        publication.treeHash,
+        timestamp,
+        jobId,
+        attemptId,
+      );
+      if (result.changes !== 1) throw new Error("Publication record lost the active job lease");
+      this.#recordEvent(jobId, attemptId, "PUBLICATION_RECORDED", {
+        prUrl: publication.prUrl,
+        headSha: publication.headSha,
+        treeHash: publication.treeHash,
+      }, timestamp);
+      this.#database.exec("COMMIT");
+      return this.get(jobId)!;
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  completeDelivery(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    completion: DeliveryCompletion,
+  ): Job {
+    const timestamp = nowIso();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const attempt = this.getAttempt(attemptId);
+      const job = this.get(jobId);
+      if (
+        !attempt
+        || attempt.jobId !== jobId
+        || attempt.workerToken !== workerToken
+        || job?.currentAttemptId !== attemptId
+      ) {
+        throw new Error("Delivery completion does not own the active attempt lease");
+      }
+      if (job.status === "CANCEL_REQUESTED") {
+        throw new Error(`Job cancellation is pending: ${job.id}`);
+      }
+      if (attempt.status !== "PUBLISHING" || job.status !== "PUBLISHING") {
+        throw new Error(`Job is not ready for delivery completion: ${job.id}`);
+      }
+      if (
+        job.prUrl !== completion.prUrl
+        || job.headSha !== completion.headSha
+        || job.treeHash !== completion.treeHash
+        || attempt.treeHash !== completion.treeHash
+      ) {
+        throw new Error("Delivery completion does not match the recorded publication");
+      }
+      const attemptResult = this.#database.prepare(`
+        UPDATE attempts
+        SET status = 'COMPLETED', updated_at = ?, head_sha = ?, tree_hash = ?
+        WHERE id = ? AND worker_token = ? AND status = 'PUBLISHING'
+      `).run(
+        timestamp,
+        completion.headSha,
+        completion.treeHash,
+        attemptId,
+        workerToken,
+      );
+      if (attemptResult.changes !== 1) {
+        throw new Error("Delivery completion lost the active attempt lease");
+      }
+      const jobResult = this.#database.prepare(`
+        UPDATE jobs
+        SET status = 'DELIVERED_REVIEW_REQUIRED', updated_at = ?,
+            pr_url = ?, head_sha = ?, tree_hash = ?, attestation_path = ?,
+            report_path = ?, delivered_at = ?
+        WHERE id = ? AND status = 'PUBLISHING' AND current_attempt_id = ?
+      `).run(
+        timestamp,
+        completion.prUrl,
+        completion.headSha,
+        completion.treeHash,
+        completion.attestationPath,
+        completion.reportPath,
+        completion.deliveredAt,
+        jobId,
+        attemptId,
+      );
+      if (jobResult.changes !== 1) {
+        throw new Error("Delivery completion lost the active job");
+      }
+      this.#recordEvent(jobId, attemptId, "ATTEMPT_TRANSITIONED", {
+        from: "PUBLISHING",
+        to: "COMPLETED",
+      }, timestamp);
+      this.#recordEvent(jobId, attemptId, "JOB_TRANSITIONED", {
+        to: "DELIVERED_REVIEW_REQUIRED",
+      }, timestamp);
       this.#database.exec("COMMIT");
       return this.get(jobId)!;
     } catch (error) {

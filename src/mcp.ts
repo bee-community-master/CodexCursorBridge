@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -7,7 +6,18 @@ import { z } from "zod";
 import { loadMachineConfig, runtimePaths } from "./config.js";
 import { resolveCommittedTask } from "./dispatch.js";
 import { wakeSupervisor } from "./launchd.js";
-import { errorResponse, successResponse, warningResponse, type ToolResponse } from "./response.js";
+import { readReportText, wakeJobSupervisor } from "./mcp-support.js";
+import { safeErrorMessage } from "./redaction.js";
+import {
+  cancellationSummary,
+  cancellationToolStatus,
+  errorResponse,
+  jobNextActions,
+  missingReportResponse,
+  successResponse,
+  warningResponse,
+  type ToolResponse,
+} from "./response.js";
 import { JobStore, terminalJobStatuses, type Job } from "./state.js";
 
 const inferredRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -22,11 +32,11 @@ function jobResponse(job: Job, summary: string): ToolResponse {
   if (worktree && job.cleanupStatus !== "COMPLETED") artifacts.worktree = worktree;
   if (job.prUrl) artifacts.pr = job.prUrl;
   if (job.attestationPath) artifacts.attestation = job.attestationPath;
-  const nextActions = job.status === "DELIVERED_REVIEW_REQUIRED"
-    ? ["Review the Draft PR, report, and attestation before marking it ready."]
-    : terminalJobStatuses.has(job.status)
-      ? job.reportPath ? [] : ["Call cursor_get_report after the report becomes available."]
-      : ["Call cursor_get_task with this jobId to continue monitoring."];
+  const nextActions = jobNextActions(
+    job.status,
+    job.reportPath !== undefined,
+    job.currentAttemptId !== undefined,
+  );
   return {
     ...successResponse(summary, nextActions, artifacts),
     jobId: job.id, jobStatus: job.status, repositoryAlias: job.repositoryAlias, taskId: job.taskId,
@@ -88,11 +98,24 @@ server.registerTool("cursor_start_task", {
       store.update(job.id, { logPath: path.join(paths.logsDir, `${job.id}.log`) });
       job = store.get(job.id)!;
     }
-    if (!terminalJobStatuses.has(job.status)) await wakeSupervisor();
+    const wakeWarning = await wakeJobSupervisor(store, job, wakeSupervisor);
+    if (wakeWarning) {
+      return toolResult({
+        ...jobResponse(
+          job,
+          `Cursor task ${taskId} is queued, but the supervisor wake request failed.`,
+        ),
+        status: "warning",
+        next_actions: [
+          "Retry cursor_start_task once with the same approved identity, then monitor this jobId.",
+        ],
+        warning: { root_cause: wakeWarning },
+      });
+    }
     return toolResult(jobResponse(job, `Cursor task ${taskId} is ${job.status.toLowerCase()}.`));
   } catch (error) {
     return toolResult(errorResponse(
-      "Cursor task was not started.", error instanceof Error ? error.message : String(error),
+      "Cursor task was not started.", safeErrorMessage(error),
       "Correct the task, repository registration, or local configuration and retry with the same approved spec.",
       "Do not retry if the task version or hash is stale; approve a new spec instead.",
     ));
@@ -125,19 +148,28 @@ server.registerTool("cursor_cancel_task", {
     ));
   }
   const requested = store.requestCancellation(jobId);
-  try {
-    await wakeSupervisor();
-  } catch (error) {
-    store.recordEvent(jobId, requested.currentAttemptId, "SUPERVISOR_WAKE_FAILED", {
-      error: error instanceof Error ? error.message : String(error),
-    });
+  let wakeWarning: string | undefined;
+  if (requested.status === "CANCEL_REQUESTED") {
+    wakeWarning = await wakeJobSupervisor(store, requested, wakeSupervisor);
   }
-  return toolResult(jobResponse(
+  const response = jobResponse(
     requested,
-    requested.status === "CANCELLED"
-      ? "Queued Cursor task was cancelled."
-      : "Cursor task cancellation was requested and awaits worker confirmation.",
-  ));
+    cancellationSummary(job.status, requested.status),
+  );
+  return toolResult({
+    ...response,
+    status: cancellationToolStatus(
+      job.status,
+      requested.status,
+      wakeWarning !== undefined,
+    ),
+    ...(wakeWarning ? {
+      next_actions: [
+        "Retry cursor_cancel_task once for this jobId, then continue monitoring cancellation.",
+      ],
+      warning: { root_cause: wakeWarning },
+    } : {}),
+  });
 });
 
 server.registerTool("cursor_get_report", {
@@ -147,9 +179,32 @@ server.registerTool("cursor_get_report", {
 }, async ({ jobId }) => {
   const job = store.get(jobId);
   if (!job) return toolResult(errorResponse("Job was not found.", `Unknown job: ${jobId}`, "Check the job ID and retry.", "Stop if no matching start result exists."));
-  if (!job.reportPath) return toolResult(warningResponse("Report is not available yet.", ["Monitor the job with cursor_get_task."], job.logPath ? { log: job.logPath } : {}));
-  const report = await readFile(job.reportPath, "utf8");
-  return toolResult({ ...jobResponse(job, "Cursor task report is available."), report });
+  if (!job.reportPath) {
+    return toolResult(missingReportResponse(
+      job.status,
+      job.currentAttemptId !== undefined,
+      job.logPath,
+    ));
+  }
+  const report = await readReportText(job.reportPath);
+  if (!report.ok) {
+    return toolResult({
+      ...jobResponse(job, "Cursor task report could not be read."),
+      status: "error",
+      next_actions: [
+        "Retry cursor_get_report once; stop and inspect the report artifact path if it still fails.",
+      ],
+      error: {
+        root_cause: report.error,
+        safe_retry: "Retry cursor_get_report once for this jobId.",
+        stop_condition: "Stop if the same report artifact remains unreadable.",
+      },
+    });
+  }
+  return toolResult({
+    ...jobResponse(job, "Cursor task report is available."),
+    report: report.report,
+  });
 });
 
 const transport = new StdioServerTransport();

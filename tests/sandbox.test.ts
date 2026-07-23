@@ -1,3 +1,5 @@
+import { mkdir, mkdtemp, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createVerificationSandbox } from "../src/sandbox.js";
@@ -17,7 +19,15 @@ describe("verification sandbox", () => {
         PATH: "/tmp/attacker-bin",
       },
       baseEnv: {
-        PATH: "/opt/homebrew/bin:/usr/bin:/bin",
+        PATH: [
+          "",
+          "relative-bin",
+          "/tmp/bridge-worktree/bin",
+          "/tmp/bridge-scratch/bin",
+          "/opt/homebrew/bin",
+          "/usr/bin",
+          "/bin",
+        ].join(":"),
         HOME: "/Users/private",
         GH_TOKEN: "secret",
         CURSOR_BRIDGE_API_KEY: "secret",
@@ -49,5 +59,26 @@ describe("verification sandbox", () => {
     expect(invocation.env).not.toHaveProperty("GH_TOKEN");
     expect(invocation.env).not.toHaveProperty("CURSOR_BRIDGE_API_KEY");
     expect(invocation.env).not.toHaveProperty("SSH_AUTH_SOCK");
+  });
+
+  it("removes a PATH entry located in the writable worktree even when it resolves outside", async () => {
+    if (process.platform !== "darwin") return;
+    const directory = await mkdtemp(path.join(tmpdir(), "cursor-sandbox-path-"));
+    const worktree = path.join(directory, "worktree");
+    const scratchDir = path.join(directory, "scratch");
+    await mkdir(worktree);
+    await mkdir(scratchDir);
+    const linkedBin = path.join(worktree, "bin");
+    await symlink("/usr/bin", linkedBin);
+
+    const invocation = createVerificationSandbox({
+      worktree,
+      scratchDir,
+      command: "node",
+      args: [],
+      baseEnv: { PATH: `${linkedBin}:/usr/bin` },
+    });
+
+    expect(invocation.env.PATH).toBe("/usr/bin");
   });
 });

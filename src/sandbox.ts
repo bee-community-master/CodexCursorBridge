@@ -34,6 +34,32 @@ function pathVariants(value: string): string[] {
   return [...new Set([resolved, canonicalRoot(resolved)])];
 }
 
+function pathIsWithin(candidate: string, root: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === ""
+    || (!relative.startsWith(`..${path.sep}`)
+      && relative !== ".."
+      && !path.isAbsolute(relative));
+}
+
+function isWithin(candidate: string, root: string): boolean {
+  return pathIsWithin(path.resolve(candidate), path.resolve(root))
+    || pathIsWithin(canonicalRoot(candidate), canonicalRoot(root));
+}
+
+function executablePath(value: string | undefined, writableRoots: readonly string[]): string {
+  const fallback = ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+  const entries = (value ?? fallback.join(path.delimiter))
+    .split(path.delimiter)
+    .filter((entry) =>
+      entry.length > 0
+      && path.isAbsolute(entry)
+      && !/[\0\r\n]/.test(entry)
+      && !writableRoots.some((root) => isWithin(entry, root)),
+    );
+  return [...new Set(entries.length > 0 ? entries : fallback)].join(path.delimiter);
+}
+
 function ancestorLiterals(roots: readonly string[]): string[] {
   const ancestors = new Set<string>();
   for (const root of roots) {
@@ -96,7 +122,7 @@ export function createVerificationSandbox(input: VerificationSandboxInput): Veri
   const baseEnv = input.baseEnv ?? process.env;
   const worktree = path.resolve(input.worktree);
   const scratchDir = path.resolve(input.scratchDir);
-  const pathValue = baseEnv.PATH ?? "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+  const pathValue = executablePath(baseEnv.PATH, [worktree, scratchDir]);
   const env: NodeJS.ProcessEnv = {
     ...input.taskEnv,
     PATH: pathValue,

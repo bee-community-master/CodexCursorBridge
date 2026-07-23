@@ -20,7 +20,15 @@ export interface ChangeAssessment {
 }
 
 function isTestFile(file: string): boolean {
-  return file.startsWith("tests/") || /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/.test(file);
+  const segments = file.split("/");
+  const basename = segments.at(-1) ?? "";
+  const testDirectories = new Set(["test", "tests", "__tests__", "spec", "specs"]);
+  return segments.slice(0, -1).some((segment) =>
+    testDirectories.has(segment.toLowerCase())
+    || /(?:Tests?|Specs?)$/.test(segment))
+    || /(?:^|[._-])(?:test|spec)s?(?:[._-]|$)/i.test(basename)
+    || /(?:Tests?|Specs?)(?:\.[^.]+)+$/.test(basename)
+    || /^(?:Test|Spec)[A-Z0-9].*(?:\.[^.]+)+$/.test(basename);
 }
 
 export function assessChanges(input: ChangeAssessmentInput): ChangeAssessment {

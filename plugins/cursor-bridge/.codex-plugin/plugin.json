@@ -1,6 +1,6 @@
 {
   "name": "cursor-bridge",
-  "version": "0.2.0+codex.20260723090520",
+  "version": "0.2.0+codex.20260723220725",
   "description": "Delegate approved Codex tasks to a durable local Cursor supervisor with independent verification.",
   "author": {
     "name": "bee-community-master"

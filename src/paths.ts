@@ -1,16 +1,38 @@
 import path from "node:path";
 import { minimatch } from "minimatch";
 
+function containsControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0)!;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
+}
+
 export function assertRelativeRepoPath(value: string): string {
-  const normalized = value.replaceAll("\\", "/");
-  if (path.posix.isAbsolute(normalized) || normalized.split("/").includes("..")) {
+  if (
+    value.length === 0
+    || value.includes("\\")
+    || containsControlCharacter(value)
+    || path.posix.isAbsolute(value)
+    || value.split("/").includes("..")
+  ) {
     throw new Error(`Unsafe repository path: ${value}`);
   }
-  return normalized.replace(/^\.\//, "");
+  const normalized = value.replace(/^\.\//, "");
+  if (normalized.length === 0 || normalized === ".") {
+    throw new Error(`Unsafe repository path: ${value}`);
+  }
+  return normalized;
 }
 
 function matchesAny(file: string, patterns: readonly string[]): boolean {
-  return patterns.some((pattern) => minimatch(file, assertRelativeRepoPath(pattern), { dot: true }));
+  return patterns.some((pattern) =>
+    minimatch(file, assertRelativeRepoPath(pattern), {
+      dot: true,
+      nocomment: true,
+      nonegate: true,
+    }),
+  );
 }
 
 export interface ChangedPathEvaluation {

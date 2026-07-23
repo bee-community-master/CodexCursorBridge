@@ -34,29 +34,32 @@ The source was the approved implementation plan in the Codex task. It was normal
 
 | # | Guarantee | Test or command | Type | Result |
 |---|---|---|---|---|
-| 1 | Task approval binds a stable spec hash to target origin/base SHA, context blobs, policy version, and verification profile. | `tests/task.test.ts`, `tests/dispatch.test.ts` | Integration | PASS |
-| 2 | Traversal, forbidden paths, out-of-scope paths, oversized diffs, and deleted tests block publication. | `tests/paths.test.ts`, `tests/verification.test.ts` | Unit | PASS |
-| 3 | SQLite jobs preserve immutable task provenance and atomically manage Job/Attempt/Event/Lease/Effect state, recovery, confirmed cancellation, and local effectiveness metrics. | `tests/state.test.ts` | Integration | PASS |
-| 4 | Tracked edits, deletions, and untracked files are all included in independent verification. | `tests/git.test.ts` | Integration | PASS |
-| 5 | Publication occurs only after independent verification and a second scope check; one bounded repair gets exact verifier evidence and a reclaimed verifier does not rerun implementation. | `tests/workflow.test.ts` | Integration with fake adapter | PASS |
-| 6 | Worktrees start at the approved SHA, implementer-owned commits are rejected, and commit/push/PR results are read back against the attested tree. | `tests/real-adapter.test.ts`, `tests/git.test.ts` | Integration with fake Git/GitHub | PASS |
-| 7 | Bootstrap exposes exactly four MCP tools and installs an owner-local launchd supervisor without credentials in its environment. | `tests/bootstrap.test.ts`, `tests/managed-config.test.ts`, `tests/launchd.test.ts` | Integration | PASS |
+| 1 | Task approval binds a locale-independent stable spec hash to target origin/base SHA, PR destination branch, context blobs, policy version, and verification profile; unknown fields and linked-file writes fail closed. | `tests/task.test.ts`, `tests/dispatch.test.ts` | Integration | PASS |
+| 2 | Traversal, minimatch negation, forbidden paths, out-of-scope paths, oversized diffs, and deleted tests block publication. | `tests/paths.test.ts`, `tests/verification.test.ts` | Unit | PASS |
+| 3 | SQLite jobs preserve immutable task provenance and atomically manage Job/Attempt/Event/Lease/Effect state, publication records, delivery completion, recovery, confirmed cancellation, and local effectiveness metrics. | `tests/state.test.ts` | Integration | PASS |
+| 4 | Tracked edits, deletions, untracked files, symbolic links, whitespace paths, and cross-platform test naming conventions are included without following untrusted links; an approved-base index prevents assume-unchanged/skip-worktree flags or a prior Bridge commit from hiding candidate content, and byte-changing Git attribute transforms fail closed. | `tests/git.test.ts`, `tests/verification.test.ts` | Integration and unit | PASS |
+| 5 | Publication occurs only after verification covers one stable immutable tree and a second scope check; bounded repair evidence survives lease reclaim without rerunning completed implementation, and stale workers cannot prepare, fail, or report for a replacement lease. | `tests/workflow.test.ts`, `tests/worker.test.ts` | Integration with fake adapter | PASS |
+| 6 | Worktrees start at the approved SHA, implementer-owned commits are rejected, Git hooks/signing are disabled, exact fetch/push remotes are checked, and Draft PR results are read back against the attested tree. | `tests/real-adapter.test.ts`, `tests/git.test.ts`, `tests/dispatch.test.ts` | Integration with fake Git/GitHub | PASS |
+| 7 | Bootstrap parses exact Codex plugin JSON state, exposes four MCP tools, escapes managed TOML, and installs an owner-local launchd supervisor with umask `077` and no credentials in its environment. | `tests/bootstrap-plugin.test.ts`, `tests/bootstrap.test.ts`, `tests/managed-config.test.ts`, `tests/launchd.test.ts` | Integration | PASS |
 | 8 | The built MCP server initializes and lists exactly start/status/cancel/report. | `pnpm smoke:mcp` | Protocol smoke | PASS |
 | 9 | Plugin and delegation skill describe durable supervisor execution, `DELIVERED_REVIEW_REQUIRED`, and attestation review. | `tests/plugin.test.ts`, plugin validator, skill quick validator | Packaging | PASS |
 | 10 | No known dependency advisories remain. | `pnpm audit` | Security | PASS |
-| 11 | Verifier processes receive a credential-scrubbed environment and macOS sandbox profile with network denied. | `tests/sandbox.test.ts` | Unit | PASS |
+| 11 | Verifier processes reject dynamic-loader/control overrides, receive a credential-scrubbed environment and macOS sandbox profile with network denied, and cannot resolve executables through writable path aliases; persisted diagnostics are bounded, redacted, and owner-readable only. | `tests/task.test.ts`, `tests/sandbox.test.ts`, `tests/redaction.test.ts`, `tests/real-adapter.test.ts` | Unit and integration | PASS |
 
 ## Final verification
 
-- `pnpm verify`: PASS — lint, typecheck, 46 tests, coverage, build, MCP smoke.
-- Coverage: statements 88.86%, branches 83.79%, functions 98.66%, lines 93.53% for the core policy modules.
+- `pnpm verify`: PASS — lint, typecheck, 165 tests, coverage, build, MCP smoke.
+- Coverage: statements 86.43%, branches 80.99%, functions 96.47%, lines 89.44% for the core policy modules.
 - Built supervisor runtime smoke: PASS — schema v3 DB initialized with mode `0600`, zero-job stats read back, and SIGINT shut down cleanly.
-- Real macOS verifier sandbox smoke: PASS — an allowlisted worktree write succeeded with canonical/symlink path handling while network and Keychain service access remained denied by policy.
-- `pnpm smoke:cursor`: NOT RUN — this Mac has no `codex-cursor-bridge/cursor-api-key` Keychain item; bootstrap/authentication remains an explicit owner action.
+- Real macOS verifier sandbox smoke: PASS — an allowlisted worktree write succeeded while network access and reads from a non-sensitive test Keychain outside the allowlisted roots were denied.
+- `pnpm smoke:cursor`: BLOCKED BEFORE SDK CALL — this Mac has no `codex-cursor-bridge/cursor-api-key` Keychain item; bootstrap/authentication remains an explicit owner action.
 - Plugin validator and skill quick validator: PASS.
 - `pnpm audit`: PASS — `fast-uri` and `@hono/node-server` transitive dependencies are pinned to patched versions; no known vulnerabilities remain.
 
 ## Known gaps
 
 - A live Cursor account smoke still requires the owner to run `pnpm bootstrap` and configure the Keychain item.
+- Verification runs in the candidate worktree, not a hermetic rebuilt checkout. Ignored dependency/build artifacts may affect a repository's own verification commands and must be controlled by those commands.
+- A crash during post-delivery cleanup can leave `cleanupStatus: PENDING` after partial local cleanup; the Draft PR and attestation remain authoritative even if the worktree path no longer exists.
+- SSH or HTTPS Git credentials must already work non-interactively from launchd; the supervisor deliberately does not inherit a shell credential environment.
 - Credential installation and the launchd supervisor intentionally target personal macOS use; Linux and Windows are out of scope.

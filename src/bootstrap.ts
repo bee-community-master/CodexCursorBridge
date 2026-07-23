@@ -1,48 +1,100 @@
 import { Cursor } from "@cursor/sdk";
-import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
+import { z } from "zod";
 import { emptyMachineConfig, loadMachineConfig, runtimePaths, saveMachineConfig } from "./config.js";
 import { runFile } from "./git.js";
-import { deleteCursorApiKey, storeCursorApiKey } from "./keychain.js";
+import {
+  deleteCursorApiKey,
+  readCursorApiKey,
+  storeCursorApiKey,
+} from "./keychain.js";
 import { installSupervisor, uninstallSupervisor } from "./launchd.js";
 import { removeManagedRegistrationBlocks, upsertManagedMcpBlock } from "./managed-config.js";
 
 const agentMarker = "# Managed by codex-cursor-bridge bootstrap";
 const marketplaceName = "coding-agent";
+const pluginId = `cursor-bridge@${marketplaceName}`;
 
-async function readSecret(prompt: string): Promise<string> {
-  if (!process.stdin.isTTY || !process.stdin.setRawMode) throw new Error("Interactive terminal is required for secret input");
-  process.stdout.write(prompt);
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
-  process.stdin.setEncoding("utf8");
-  return new Promise((resolve, reject) => {
-    let value = "";
-    const onData = (chunk: string): void => {
-      for (const character of chunk) {
-        if (character === "\u0003") {
-          cleanup();
-          reject(new Error("Cancelled"));
-        } else if (character === "\r" || character === "\n") {
-          cleanup();
-          process.stdout.write("\n");
-          resolve(value);
-        } else if (character === "\u007f") {
-          value = value.slice(0, -1);
-        } else {
-          value += character;
-        }
-      }
-    };
-    const cleanup = (): void => {
-      process.stdin.off("data", onData);
-      process.stdin.setRawMode(false);
-      process.stdin.pause();
-    };
-    process.stdin.on("data", onData);
-  });
+const marketplaceListSchema = z.object({
+  marketplaces: z.array(z.object({
+    name: z.string(),
+    root: z.string(),
+  })),
+});
+
+const pluginListSchema = z.object({
+  installed: z.array(z.object({
+    pluginId: z.string(),
+  })),
+});
+
+async function configuredMarketplace(): Promise<{ name: string; root: string } | undefined> {
+  const output = await runFile(
+    "codex",
+    ["plugin", "marketplace", "list", "--json"],
+  );
+  const marketplaces = marketplaceListSchema.parse(
+    JSON.parse(output.stdout),
+  ).marketplaces.filter((item) => item.name === marketplaceName);
+  if (marketplaces.length > 1) {
+    throw new Error(`Multiple Codex marketplaces use the name ${marketplaceName}`);
+  }
+  return marketplaces[0];
+}
+
+async function isPluginInstalled(): Promise<boolean> {
+  const output = await runFile("codex", ["plugin", "list", "--json"]);
+  return pluginListSchema.parse(
+    JSON.parse(output.stdout),
+  ).installed.some((item) => item.pluginId === pluginId);
+}
+
+function isNotFound(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && error.code === "ENOENT";
+}
+
+async function readOptionalPlainFile(file: string): Promise<string | undefined> {
+  try {
+    const metadata = await lstat(file);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error("Codex config must be a plain file, not a symbolic link");
+    }
+    return await readFile(file, "utf8");
+  } catch (error) {
+    if (isNotFound(error)) return undefined;
+    throw error;
+  }
+}
+
+async function writeOwnerOnlyAtomic(file: string, content: string): Promise<void> {
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, content, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    await chmod(temporary, 0o600);
+    await rename(temporary, file);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
 }
 
 async function chooseGrok(apiKey: string): Promise<string> {
@@ -60,19 +112,30 @@ async function chooseGrok(apiKey: string): Promise<string> {
   return selected.id;
 }
 
-async function installPlugin(projectRoot: string): Promise<void> {
-  const listing = await runFile("codex", ["plugin", "marketplace", "list"]);
-  const marketplaceExists = listing.stdout.includes(`\`${marketplaceName}\``);
-  const pointsToCurrentClone = listing.stdout.includes(projectRoot);
-  if (marketplaceExists && !pointsToCurrentClone) {
-    try { await runFile("codex", ["plugin", "remove", `cursor-bridge@${marketplaceName}`]); } catch { /* May not be installed. */ }
+export async function installPlugin(projectRoot: string): Promise<void> {
+  const marketplace = await configuredMarketplace();
+  const pointsToCurrentClone = marketplace !== undefined
+    && path.resolve(marketplace.root) === path.resolve(projectRoot);
+
+  if (await isPluginInstalled()) {
+    await runFile("codex", ["plugin", "remove", pluginId]);
+  }
+  if (marketplace && !pointsToCurrentClone) {
     await runFile("codex", ["plugin", "marketplace", "remove", marketplaceName]);
   }
-  if (!marketplaceExists || !pointsToCurrentClone) {
+  if (!pointsToCurrentClone) {
     await runFile("codex", ["plugin", "marketplace", "add", projectRoot]);
   }
-  try { await runFile("codex", ["plugin", "remove", `cursor-bridge@${marketplaceName}`]); } catch { /* First install. */ }
-  await runFile("codex", ["plugin", "add", `cursor-bridge@${marketplaceName}`]);
+  await runFile("codex", ["plugin", "add", pluginId]);
+}
+
+export async function uninstallPlugin(): Promise<void> {
+  if (await isPluginInstalled()) {
+    await runFile("codex", ["plugin", "remove", pluginId]);
+  }
+  if (await configuredMarketplace()) {
+    await runFile("codex", ["plugin", "marketplace", "remove", marketplaceName]);
+  }
 }
 
 export async function installCodexRegistration(projectRoot: string, codexHome: string): Promise<{ configFile: string }> {
@@ -80,36 +143,53 @@ export async function installCodexRegistration(projectRoot: string, codexHome: s
   const legacyAgentFile = path.join(codexHome, "agents", "cursor.toml");
   await mkdir(codexHome, { recursive: true, mode: 0o700 });
 
-  let config = "";
-  try { config = await readFile(configFile, "utf8"); } catch { /* New Codex home. */ }
+  const config = await readOptionalPlainFile(configFile) ?? "";
   const clean = removeManagedRegistrationBlocks(config);
   if (/^\[mcp_servers\.cursor_bridge\]\s*$/m.test(clean)) {
     throw new Error("An unmanaged [mcp_servers.cursor_bridge] registration already exists");
   }
-  if (config) await copyFile(configFile, `${configFile}.cursor-bridge-backup-${Date.now()}`);
-  await writeFile(configFile, upsertManagedMcpBlock(config, projectRoot), { encoding: "utf8", mode: 0o600 });
+  if (config) {
+    const backupFile = `${configFile}.cursor-bridge-backup-${Date.now()}-${randomUUID()}`;
+    await writeFile(backupFile, config, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    await chmod(backupFile, 0o600);
+  }
+  await writeOwnerOnlyAtomic(configFile, upsertManagedMcpBlock(config, projectRoot));
   try {
     const legacyAgent = await readFile(legacyAgentFile, "utf8");
     if (legacyAgent.startsWith(agentMarker)) await rm(legacyAgentFile);
-  } catch { /* No managed legacy agent file. */ }
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
   return { configFile };
+}
+
+export async function loadBootstrapConfig(
+  configFile: string,
+  cursorModelId: string,
+): Promise<ReturnType<typeof emptyMachineConfig>> {
+  try {
+    const existing = await loadMachineConfig(configFile);
+    return { ...existing, cursorModelId };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return emptyMachineConfig(cursorModelId);
+  }
 }
 
 export async function bootstrap(projectRoot: string): Promise<void> {
   if (process.platform !== "darwin") throw new Error("Cursor Bridge v1 supports macOS only");
   await runFile("pnpm", ["build"], { cwd: projectRoot, timeoutMs: 120_000 });
-  const apiKey = await readSecret("Cursor API key (input hidden): ");
-  await storeCursorApiKey(apiKey);
+  process.stdout.write("Enter the Cursor API key in the macOS Keychain prompt.\n");
+  await storeCursorApiKey();
+  const apiKey = await readCursorApiKey();
   const cursorModelId = await chooseGrok(apiKey);
 
   const paths = runtimePaths(projectRoot);
-  let machineConfig = emptyMachineConfig(cursorModelId);
-  try {
-    const existing = await loadMachineConfig(paths.configFile);
-    machineConfig = { ...existing, cursorModelId };
-  } catch {
-    // First install or a missing machine-local config.
-  }
+  const machineConfig = await loadBootstrapConfig(paths.configFile, cursorModelId);
   await saveMachineConfig(paths.configFile, machineConfig);
 
   const codexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
@@ -124,16 +204,17 @@ export async function uninstall(projectRoot: string, deleteKey: boolean): Promis
   const codexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
   const configFile = path.join(codexHome, "config.toml");
   const agentFile = path.join(codexHome, "agents", "cursor.toml");
-  try {
-    const config = await readFile(configFile, "utf8");
-    await writeFile(configFile, removeManagedRegistrationBlocks(config), { encoding: "utf8", mode: 0o600 });
-  } catch { /* Already absent. */ }
+  const config = await readOptionalPlainFile(configFile);
+  if (config !== undefined) {
+    await writeOwnerOnlyAtomic(configFile, removeManagedRegistrationBlocks(config));
+  }
   try {
     const agent = await readFile(agentFile, "utf8");
     if (agent.startsWith(agentMarker)) await rm(agentFile);
-  } catch { /* Already absent. */ }
-  try { await runFile("codex", ["plugin", "remove", `cursor-bridge@${marketplaceName}`]); } catch { /* Already absent. */ }
-  try { await runFile("codex", ["plugin", "marketplace", "remove", marketplaceName]); } catch { /* Already absent. */ }
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
+  await uninstallPlugin();
   if (deleteKey) await deleteCursorApiKey();
   process.stdout.write(`Uninstalled Cursor Bridge registration for ${projectRoot}. Local job history was preserved.\n`);
 }

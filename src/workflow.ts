@@ -1,5 +1,6 @@
 import type { RepositoryConfig } from "./config.js";
-import type { CandidateTree, CollectedChanges } from "./git.js";
+import type { CandidateTree, CollectedChanges, WorktreeIdentity } from "./git.js";
+import { safeErrorMessage } from "./redaction.js";
 import {
   terminalJobStatuses,
   type Attempt,
@@ -15,6 +16,7 @@ export interface PreparedWorktree {
   baseSha: string;
   pushBranch: string;
   localBranch: string;
+  gitIdentity?: WorktreeIdentity;
 }
 
 export interface ImplementerOutcome {
@@ -80,7 +82,10 @@ export interface WorkflowAdapter {
     attempt: Attempt,
     repairFeedback?: string,
   ): Promise<ImplementerOutcome>;
-  collectChanges(worktree: PreparedWorktree): Promise<CollectedChanges>;
+  collectChanges(
+    worktree: PreparedWorktree,
+    candidate?: CandidateTree,
+  ): Promise<CollectedChanges>;
   runVerification(worktree: PreparedWorktree, task: ApprovedTask): Promise<VerificationResult[]>;
   computeCandidateTree(worktree: PreparedWorktree): Promise<CandidateTree>;
   publish(
@@ -88,6 +93,7 @@ export interface WorkflowAdapter {
     task: ApprovedTask,
     repository: RepositoryConfig,
     input: PublicationInput,
+    attempt: Attempt,
   ): Promise<PublicationResult>;
   writeAttestation(data: AttestationData): Promise<string>;
   writeReport(data: WorkflowReportData): Promise<string>;
@@ -151,34 +157,53 @@ export async function executeWorkflow(
   adapter: WorkflowAdapter,
 ): Promise<void> {
   const jobId = claim.job.id;
+  const workerToken = claim.attempt.workerToken;
   let attempt = claim.attempt;
   let prepared: PreparedWorktree | undefined;
   let initialChanges: CollectedChanges | undefined;
   let finalChanges: CollectedChanges | undefined;
   let assessment: ChangeAssessment | undefined;
   let verification: VerificationResult[] | undefined;
-  let cursorSummary: string | undefined;
+  let cursorSummary = attempt.outcomeSummary;
+  let tree: CandidateTree | undefined;
 
   try {
     if (await confirmCancellationIfRequested(store, adapter, claim, attempt)) return;
+    store.assertActiveAttempt(
+      jobId,
+      attempt.id,
+      attempt.workerToken,
+      attempt.status,
+    );
 
     prepared = await adapter.prepare(store.get(jobId) ?? claim.job, task, repository);
+    const preparedGitConfigDigest = prepared.gitIdentity?.configDigest;
+    if (
+      attempt.gitConfigDigest
+      && attempt.gitConfigDigest !== preparedGitConfigDigest
+    ) {
+      throw new Error(
+        "STALE_SPEC: prepared worktree Git configuration identity changed",
+      );
+    }
+    attempt = store.updateAttempt(attempt.id, attempt.workerToken, {
+      worktree: prepared.worktree,
+      baseSha: prepared.baseSha,
+      ...(preparedGitConfigDigest
+        ? { gitConfigDigest: preparedGitConfigDigest }
+        : {}),
+    });
+    if (await confirmCancellationIfRequested(store, adapter, claim, attempt)) return;
     if (attempt.status === "PREPARING") {
       attempt = store.transitionAttempt(
         attempt.id,
         attempt.workerToken,
         ["PREPARING"],
         "IMPLEMENTING",
-        { worktree: prepared.worktree, baseSha: prepared.baseSha },
       );
-    } else {
-      attempt = store.updateAttempt(attempt.id, attempt.workerToken, {
-        worktree: prepared.worktree,
-        baseSha: prepared.baseSha,
-      });
     }
 
-    let feedback: string | undefined;
+    let feedback = attempt.ordinal > 1 ? attempt.errorMessage : undefined;
     for (;;) {
       if (attempt.status === "REPAIRING") {
         attempt = store.transitionAttempt(
@@ -209,7 +234,10 @@ export async function executeWorkflow(
             attempt.workerToken,
             ["IMPLEMENTING"],
             "BLOCKED",
-            outcomeFields,
+            {
+              ...outcomeFields,
+              errorMessage: safeErrorMessage(outcome.reason ?? outcome.summary),
+            },
           );
           await persistReport(store, adapter, {
             job: store.get(jobId)!,
@@ -255,9 +283,67 @@ export async function executeWorkflow(
         return;
       }
 
+      const treeBeforeVerification = await adapter.computeCandidateTree(prepared);
       verification = await adapter.runVerification(prepared, task);
+      if (await confirmCancellationIfRequested(store, adapter, claim, attempt)) return;
+      const treeAfterVerification = await adapter.computeCandidateTree(prepared);
+      finalChanges = await adapter.collectChanges(prepared, treeAfterVerification);
+      assessment = assessmentFor(task, finalChanges);
+      if (!assessment.ok) {
+        attempt = store.transitionAttempt(
+          attempt.id,
+          attempt.workerToken,
+          [attempt.status],
+          "SCOPE_VIOLATION",
+          { errorMessage: assessment.reasons.join("; ") },
+        );
+        await persistReport(store, adapter, {
+          job: store.get(jobId)!,
+          task,
+          changes: finalChanges,
+          initialChanges,
+          assessment,
+          verification,
+          attempts: store.listAttempts(jobId),
+          ...(cursorSummary ? { cursorSummary } : {}),
+        });
+        return;
+      }
+      if (treeBeforeVerification.treeHash !== treeAfterVerification.treeHash) {
+        verification = [
+          ...verification,
+          {
+            command: "candidate-tree-stability",
+            status: "failed",
+            durationMs: 0,
+            output: [
+              "Candidate tree changed during independent verification.",
+              `Before: ${treeBeforeVerification.treeHash}`,
+              `After: ${treeAfterVerification.treeHash}`,
+              "The verification evidence does not cover the candidate that would be published.",
+            ].join("\n"),
+          },
+        ];
+      }
+      if (finalChanges.files.length === 0) {
+        verification = [
+          ...verification,
+          {
+            command: "candidate-change-presence",
+            status: "failed",
+            durationMs: 0,
+            output: [
+              "The completed implementation contains no changed files.",
+              "A Draft PR cannot be delivered without a candidate change.",
+            ].join("\n"),
+          },
+        ];
+      }
       const failure = verificationFailure(verification);
-      if (!failure) break;
+      if (!failure) {
+        tree = treeAfterVerification;
+        break;
+      }
       if (attempt.status === "PUBLISHING" || attempt.ordinal >= claim.job.maxAttempts) {
         const message = `Verification failed: ${failure.command}`;
         attempt = store.transitionAttempt(
@@ -270,7 +356,8 @@ export async function executeWorkflow(
         await persistReport(store, adapter, {
           job: store.get(jobId)!,
           task,
-          changes: initialChanges,
+          changes: finalChanges,
+          initialChanges,
           assessment,
           verification,
           attempts: store.listAttempts(jobId),
@@ -280,34 +367,19 @@ export async function executeWorkflow(
         return;
       }
       feedback = repairFeedback(failure);
-      attempt = store.beginRepairAttempt(jobId, attempt.id, attempt.workerToken, leaseMs);
-    }
-
-    if (await confirmCancellationIfRequested(store, adapter, claim, attempt)) return;
-    finalChanges = await adapter.collectChanges(prepared);
-    assessment = assessmentFor(task, finalChanges);
-    if (!assessment.ok) {
-      attempt = store.transitionAttempt(
+      attempt = store.beginRepairAttempt(
+        jobId,
         attempt.id,
         attempt.workerToken,
-        [attempt.status],
-        "SCOPE_VIOLATION",
-        { errorMessage: assessment.reasons.join("; ") },
+        leaseMs,
+        feedback,
       );
-      await persistReport(store, adapter, {
-        job: store.get(jobId)!,
-        task,
-        changes: finalChanges,
-        initialChanges,
-        assessment,
-        ...(verification ? { verification } : {}),
-        attempts: store.listAttempts(jobId),
-        ...(cursorSummary ? { cursorSummary } : {}),
-      });
-      return;
     }
 
-    const tree = await adapter.computeCandidateTree(prepared);
+    if (!tree || !initialChanges || !finalChanges || !assessment || !verification) {
+      throw new Error("Verified publication inputs are incomplete");
+    }
+    if (await confirmCancellationIfRequested(store, adapter, claim, attempt)) return;
     attempt = attempt.status === "PUBLISHING"
       ? store.updateAttempt(attempt.id, attempt.workerToken, { treeHash: tree.treeHash })
       : store.transitionAttempt(
@@ -328,32 +400,50 @@ export async function executeWorkflow(
       attempts: store.listAttempts(jobId),
       cursorSummary: cursorSummary ?? "",
     };
-    const publication = await adapter.publish(prepared, task, repository, publicationInput);
+    const publication = await adapter.publish(
+      prepared,
+      task,
+      repository,
+      publicationInput,
+      attempt,
+    );
     if (publication.treeHash !== tree.treeHash || publication.remoteHeadSha !== publication.headSha) {
       throw new Error("Published Git readback does not match the attested candidate");
     }
-    if (task.pull_request.mode === "new_draft" && !publication.isDraft) {
-      throw new Error("New pull request was not created as a draft");
+    if (!publication.isDraft) {
+      throw new Error("Pull request is not a draft");
     }
-    store.update(jobId, {
+    const publishedTreeHash = tree.treeHash;
+    store.recordPublication(jobId, attempt.id, attempt.workerToken, {
       prUrl: publication.prUrl,
       headSha: publication.headSha,
-      treeHash: tree.treeHash,
+      treeHash: publishedTreeHash,
     });
 
-    const attestationPath = await adapter.writeAttestation({
-      job: store.get(jobId)!,
-      task,
-      publication,
-      ...publicationInput,
-    });
+    const projectedAttempts = store.listAttempts(jobId).map((item) =>
+      item.id === attempt.id
+        ? {
+          ...item,
+          status: "COMPLETED" as const,
+          headSha: publication.headSha,
+          treeHash: publishedTreeHash,
+        }
+        : item,
+    );
     const projectedDeliveredJob: Job = {
       ...store.get(jobId)!,
       status: "DELIVERED_REVIEW_REQUIRED",
       prUrl: publication.prUrl,
       headSha: publication.headSha,
-      treeHash: tree.treeHash,
+      treeHash: publishedTreeHash,
     };
+    const attestationPath = await adapter.writeAttestation({
+      job: projectedDeliveredJob,
+      task,
+      publication,
+      ...publicationInput,
+      attempts: projectedAttempts,
+    });
     const reportPath = await adapter.writeReport({
       job: projectedDeliveredJob,
       task,
@@ -361,64 +451,87 @@ export async function executeWorkflow(
       initialChanges,
       assessment,
       verification: publicationInput.verification,
-      attempts: store.listAttempts(jobId),
+      attempts: projectedAttempts,
       cursorSummary: publicationInput.cursorSummary,
       publication,
     });
-    attempt = store.transitionAttempt(
-      attempt.id,
-      attempt.workerToken,
-      ["PUBLISHING"],
-      "COMPLETED",
-      { headSha: publication.headSha, treeHash: tree.treeHash },
-    );
-    store.transitionJob(jobId, ["PUBLISHING"], "DELIVERED_REVIEW_REQUIRED", {
+    store.completeDelivery(jobId, attempt.id, attempt.workerToken, {
       prUrl: publication.prUrl,
       headSha: publication.headSha,
-      treeHash: tree.treeHash,
+      treeHash: publishedTreeHash,
       attestationPath,
       reportPath,
       deliveredAt: new Date().toISOString(),
     });
+    attempt = store.getAttempt(attempt.id)!;
 
     try {
       await adapter.cleanup(prepared, repository);
       store.update(jobId, { cleanupStatus: "COMPLETED" });
       store.recordEvent(jobId, attempt.id, "CLEANUP_COMPLETED", {});
     } catch (cleanupError) {
-      const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+      const message = safeErrorMessage(cleanupError);
       store.update(jobId, { cleanupStatus: "FAILED", cleanupError: message });
       store.recordEvent(jobId, attempt.id, "CLEANUP_FAILED", { error: message });
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = safeErrorMessage(error);
+    const staleSpec = message.startsWith("STALE_SPEC:");
     const currentJob = store.get(jobId);
     const currentAttempt = store.getAttempt(attempt.id);
+    if (currentAttempt && currentAttempt.workerToken !== workerToken) return;
     if (currentJob?.status === "CANCEL_REQUESTED" && currentAttempt) {
       try {
         await adapter.cancel(currentAttempt);
-      } finally {
-        store.confirmCancellation(jobId, currentAttempt.id, currentAttempt.workerToken);
+        store.confirmCancellation(jobId, currentAttempt.id, workerToken);
+      } catch (cancellationError) {
+        store.recordEvent(jobId, currentAttempt.id, "CANCELLATION_CONFIRMATION_FAILED", {
+          error: safeErrorMessage(cancellationError),
+        });
       }
       return;
     }
-    if (currentAttempt && !["COMPLETED", "BLOCKED", "FAILED", "CANCELLED", "SCOPE_VIOLATION"].includes(currentAttempt.status)) {
+    const publicationNeedsFinalization = currentJob?.status === "PUBLISHING"
+      && currentAttempt?.status === "PUBLISHING"
+      && currentJob.prUrl !== undefined
+      && currentJob.headSha !== undefined
+      && currentJob.treeHash !== undefined;
+    if (publicationNeedsFinalization && currentAttempt) {
+      store.recordEvent(jobId, currentAttempt.id, "DELIVERY_FINALIZATION_DEFERRED", {
+        error: message,
+      });
+      return;
+    } else if (currentAttempt && !["COMPLETED", "BLOCKED", "FAILED", "CANCELLED", "SCOPE_VIOLATION"].includes(currentAttempt.status)) {
       try {
-        store.transitionAttempt(
-          currentAttempt.id,
-          currentAttempt.workerToken,
-          [currentAttempt.status],
-          "FAILED",
-          { errorMessage: message },
-        );
+        if (staleSpec) {
+          store.failStaleSpec(
+            jobId,
+            currentAttempt.id,
+            workerToken,
+            message,
+          );
+        } else {
+          store.transitionAttempt(
+            currentAttempt.id,
+            workerToken,
+            [currentAttempt.status],
+            "FAILED",
+            { errorMessage: message },
+          );
+        }
       } catch {
-        // The original failure remains authoritative if a concurrent transition won.
+        return;
       }
     } else if (currentJob && !terminalJobStatuses.has(currentJob.status)) {
       try {
-        store.transitionJob(jobId, [currentJob.status], "FAILED", { errorMessage: message });
+        store.transitionJob(
+          jobId,
+          [currentJob.status],
+          staleSpec ? "STALE_SPEC" : "FAILED",
+          { errorMessage: message },
+        );
       } catch {
-        // The original failure remains authoritative if a concurrent transition won.
+        return;
       }
     }
     const reportJob = store.get(jobId);
