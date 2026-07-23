@@ -1,44 +1,41 @@
 import { git } from "./git-runtime.js";
 
+function matchesExpectedOrigin(
+  remoteUrl: string,
+  expectedOrigin: string,
+): boolean {
+  try {
+    return githubOriginSlug(remoteUrl) === expectedOrigin;
+  } catch {
+    return false;
+  }
+}
+
+async function assertRemoteMatches(
+  root: string,
+  expectedOrigin: string,
+  direction: "fetch" | "push",
+): Promise<void> {
+  const args = direction === "push"
+    ? ["remote", "get-url", "--push", "--all", "origin"]
+    : ["remote", "get-url", "--all", "origin"];
+  const urls = (await git(root, ...args))
+    .split(/\r?\n/)
+    .filter(Boolean);
+  if (
+    urls.length !== 1
+    || !urls.every((url) => matchesExpectedOrigin(url, expectedOrigin))
+  ) {
+    throw new Error(`Git ${direction} remote does not match the registered repository`);
+  }
+}
+
 export async function assertGitHubRemote(
   root: string,
   expectedOrigin: string,
 ): Promise<void> {
-  const fetchUrls = (await git(root, "remote", "get-url", "--all", "origin"))
-    .split(/\r?\n/)
-    .filter(Boolean);
-  if (
-    fetchUrls.length !== 1
-    || fetchUrls.some((url) => {
-      try {
-        return githubOriginSlug(url) !== expectedOrigin;
-      } catch {
-        return true;
-      }
-    })
-  ) {
-    throw new Error("Git fetch remote does not match the registered repository");
-  }
-  const pushUrls = (await git(
-    root,
-    "remote",
-    "get-url",
-    "--push",
-    "--all",
-    "origin",
-  )).split(/\r?\n/).filter(Boolean);
-  if (
-    pushUrls.length !== 1
-    || pushUrls.some((url) => {
-      try {
-        return githubOriginSlug(url) !== expectedOrigin;
-      } catch {
-        return true;
-      }
-    })
-  ) {
-    throw new Error("Git push remote does not match the registered repository");
-  }
+  await assertRemoteMatches(root, expectedOrigin, "fetch");
+  await assertRemoteMatches(root, expectedOrigin, "push");
 }
 
 export function githubOriginSlug(originUrl: string): string {

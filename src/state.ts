@@ -31,6 +31,7 @@ import {
 export {
   attemptStatuses,
   jobStatuses,
+  terminalAttemptStatuses,
   terminalJobStatuses,
 } from "./domain/job.js";
 export type {

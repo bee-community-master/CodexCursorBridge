@@ -35,6 +35,12 @@ type CursorRunStatePort = Pick<
   "isCancellationRequested" | "updateAttempt"
 >;
 
+interface LocalCursorRunOptions {
+  runtime: "local";
+  cwd: string;
+  store: JsonlLocalAgentStore;
+}
+
 const outcomeSchema = z.object({
   status: z.enum(["completed", "blocked", "needs_input"]),
   summary: z.string().min(1).max(8_000),
@@ -43,6 +49,62 @@ const outcomeSchema = z.object({
 
 function eventSummary(event: { type: string; name?: string; status?: string }): string {
   return [event.type, event.name, event.status].filter(Boolean).join(" ");
+}
+
+function hasPersistedOutcome(
+  attempt: Attempt,
+): attempt is Attempt & Required<Pick<Attempt, "outcome" | "outcomeSummary">> {
+  return attempt.outcome !== undefined
+    && attempt.outcomeSummary !== undefined;
+}
+
+function recoveredRunMetadata(
+  run: Run,
+): Pick<ImplementerOutcome, "inputTokens" | "outputTokens" | "requestId"> {
+  return {
+    ...(run.requestId ? { requestId: run.requestId } : {}),
+    ...(run.usage ? {
+      inputTokens: run.usage.inputTokens,
+      outputTokens: run.usage.outputTokens,
+    } : {}),
+  };
+}
+
+function restoredOutcome(
+  run: Run,
+  attempt: Attempt,
+  agentId: string,
+  runId: string,
+): ImplementerOutcome | undefined {
+  const metadata = recoveredRunMetadata(run);
+  if (hasPersistedOutcome(attempt)) {
+    return {
+      status: attempt.outcome,
+      agentId,
+      runId,
+      ...metadata,
+      summary: redactSensitiveText(attempt.outcomeSummary),
+      ...(attempt.outcomeReason
+        ? { reason: redactSensitiveText(attempt.outcomeReason) }
+        : {}),
+    };
+  }
+  if (run.status === "finished") {
+    return {
+      status: "needs_input",
+      agentId,
+      runId,
+      ...metadata,
+      summary: redactSensitiveText(
+        run.result ?? "Cursor finished without a persisted structured outcome.",
+      ),
+      reason: "Cursor finished without submitting a durable structured outcome.",
+    };
+  }
+  if (run.status === "error" || run.status === "cancelled") {
+    throw new Error(run.error?.message ?? `Cursor run ended with ${run.status}`);
+  }
+  return undefined;
 }
 
 function outputTool(setOutcome: (outcome: z.infer<typeof outcomeSchema>) => void): SDKCustomTool {
@@ -211,68 +273,66 @@ export class CursorImplementer {
     prepared: PreparedWorktree,
     attempt: Attempt,
   ): Promise<ImplementerOutcome | undefined> {
-    if (!attempt.cursorAgentId || !attempt.cursorRunId) return undefined;
-    const options = {
-      runtime: "local" as const,
+    const agentId = attempt.cursorAgentId;
+    const runId = attempt.cursorRunId;
+    if (!agentId || !runId) return undefined;
+    const options: LocalCursorRunOptions = {
+      runtime: "local",
       cwd: prepared.worktree,
       store: this.#cursorStore,
     };
-    let priorRun: Run;
+    let priorRun = await this.#readPriorRun(runId, options);
+    if (priorRun.status === "running" && hasPersistedOutcome(attempt)) {
+      priorRun = await this.#stopPriorRun(runId, options);
+    }
+    return restoredOutcome(priorRun, attempt, agentId, runId);
+  }
+
+  async #readPriorRun(
+    runId: string,
+    options: LocalCursorRunOptions,
+  ): Promise<Run> {
     try {
-      priorRun = await Agent.getRun(attempt.cursorRunId, options);
+      return await Agent.getRun(runId, options);
     } catch (error) {
       const detail = safeErrorMessage(error);
       await this.#logger.log(`Could not safely read prior Cursor run: ${detail}`);
       throw new Error(`Could not safely recover the prior Cursor run: ${detail}`);
     }
-    const hasPersistedOutcome = attempt.outcome !== undefined
-      && attempt.outcomeSummary !== undefined;
-    if (priorRun.status === "running" && hasPersistedOutcome) {
-      let cancellationFailure: unknown;
-      try {
-        await Agent.cancelRun(attempt.cursorRunId, options);
-      } catch (error) {
-        cancellationFailure = error;
-      }
-      try {
-        priorRun = await Agent.getRun(attempt.cursorRunId, options);
-      } catch (error) {
-        throw new Error(`Could not confirm the prior Cursor run stopped: ${safeErrorMessage(error)}`);
-      }
-      if (priorRun.status === "running") {
-        const detail = cancellationFailure ? `: ${safeErrorMessage(cancellationFailure)}` : "";
-        throw new Error(`Cursor run is still active after restoring its durable outcome${detail}`);
-      }
-      if (cancellationFailure) {
-        await this.#logger.log(
-          "Cursor cancellation reported an error, but terminal readback confirmed the run stopped.",
-        );
-      }
+  }
+
+  async #stopPriorRun(
+    runId: string,
+    options: LocalCursorRunOptions,
+  ): Promise<Run> {
+    let cancellationFailure: unknown;
+    try {
+      await Agent.cancelRun(runId, options);
+    } catch (error) {
+      cancellationFailure = error;
     }
-    if (hasPersistedOutcome || priorRun.status === "finished") {
-      return {
-        status: hasPersistedOutcome ? attempt.outcome ?? "needs_input" : "needs_input",
-        agentId: attempt.cursorAgentId,
-        runId: attempt.cursorRunId,
-        ...(priorRun.requestId ? { requestId: priorRun.requestId } : {}),
-        summary: redactSensitiveText(hasPersistedOutcome
-          ? attempt.outcomeSummary ?? "Cursor finished without a persisted structured outcome."
-          : priorRun.result ?? "Cursor finished without a persisted structured outcome."),
-        ...(hasPersistedOutcome
-          ? attempt.outcomeReason
-            ? { reason: redactSensitiveText(attempt.outcomeReason) }
-            : {}
-          : { reason: "Cursor finished without submitting a durable structured outcome." }),
-        ...(priorRun.usage ? {
-          inputTokens: priorRun.usage.inputTokens,
-          outputTokens: priorRun.usage.outputTokens,
-        } : {}),
-      };
+    let confirmed: Run;
+    try {
+      confirmed = await Agent.getRun(runId, options);
+    } catch (error) {
+      throw new Error(
+        `Could not confirm the prior Cursor run stopped: ${safeErrorMessage(error)}`,
+      );
     }
-    if (priorRun.status === "error" || priorRun.status === "cancelled") {
-      throw new Error(priorRun.error?.message ?? `Cursor run ended with ${priorRun.status}`);
+    if (confirmed.status === "running") {
+      const detail = cancellationFailure
+        ? `: ${safeErrorMessage(cancellationFailure)}`
+        : "";
+      throw new Error(
+        `Cursor run is still active after restoring its durable outcome${detail}`,
+      );
     }
-    return undefined;
+    if (cancellationFailure) {
+      await this.#logger.log(
+        "Cursor cancellation reported an error, but terminal readback confirmed the run stopped.",
+      );
+    }
+    return confirmed;
   }
 
   async #waitForOutcome(

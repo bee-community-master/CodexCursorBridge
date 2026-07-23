@@ -38,8 +38,10 @@ MCP SDK, 프로세스 실행기 같은 outbound adapter를 import하지 않는�
   데이터 계약을 소유한다.
 - `src/application/workflow-ports.ts`는 workflow가 요구하는 저장소 및 외부 실행
   포트를 소유한다. SQLite나 SDK 타입은 이 계약에 노출하지 않는다.
-- `src/application/workflow.ts`는 승인 작업의 준비, 구현, 범위 점검, 독립 검증,
-  제한된 repair, 게시 및 cleanup 순서만 조율한다.
+- `src/application/workflow.ts`는 기존 import 경로를 보존하는 facade다.
+  `workflow-execution.ts`가 승인 작업의 준비, 구현, 범위 점검, 독립 검증, 제한된
+  repair, 게시 및 cleanup 단계를 조율하고 `workflow-failure-handler.ts`가 실패,
+  취소 확인, 지연된 전달 완료와 진단 보고를 별도로 처리한다.
 - `src/state.ts`의 `JobStore`는 SQLite adapter facade다. 원자성이 필요한 Job/Attempt
   전이는 facade에 남기고, 스키마, 레코드 매핑, effect/event 원장과 전달 lifecycle은
   집중된 협력자에게 위임한다.
@@ -71,9 +73,10 @@ MCP SDK, 프로세스 실행기 같은 outbound adapter를 import하지 않는�
 - domain/application에서 outbound adapter로 향하는 import
 - 상대 source import cycle
 - 700줄을 넘는 구현 파일
+- 180줄을 넘는 개별 함수, 메서드 또는 생성자
 - 900줄을 넘는 테스트 스위트
 
 파일 길이 가드는 단순히 줄 수를 줄이기 위한 규칙이 아니다. 파일이 한 가지 변경
 이유를 갖는지 다시 검토하도록 만드는 상한이며, 의미 없는 조각내기보다 응집된
-협력자 추출을 우선한다. 테스트 상한도 Cursor 실행, Git 게시, artifact 작성처럼
-실제 production 책임을 따라 시나리오를 나누도록 유도한다.
+협력자와 이름 있는 실행 단계 추출을 우선한다. 테스트 상한도 Cursor 실행, Git 게시,
+artifact 작성처럼 실제 production 책임을 따라 시나리오를 나누도록 유도한다.

@@ -35,6 +35,27 @@ interface PublishedPullRequestInfo {
   headRefOid: string;
 }
 
+function draftPullRequestBody(
+  task: ApprovedTask,
+  input: PublicationInput,
+): string {
+  return [
+    `승인된 작업 \`${task.id}\`의 자동 구현 결과입니다.`,
+    "",
+    "## 인수 조건",
+    ...task.acceptance_criteria.map((item) => `- ${item}`),
+    "",
+    "## 독립 검증",
+    ...input.verification.map((item) =>
+      `- ${item.status === "passed" ? "PASS" : "FAIL"}: \`${item.command}\``),
+    "",
+    `- 후보 트리: \`${input.tree.treeHash}\``,
+    `- 패치 증명: \`${input.tree.patchHash}\``,
+    "",
+    "Codex Cursor Bridge가 생성했습니다. 리뷰 완료 전까지 Draft 상태를 유지해야 합니다.",
+  ].join("\n");
+}
+
 export class GitHubPullRequestAdapter {
   readonly #store: PullRequestEffectPort;
   readonly #jobId: string;
@@ -144,45 +165,65 @@ export class GitHubPullRequestAdapter {
     repository: RepositoryConfig,
     input: PublicationInput,
   ): Promise<string> {
-    const findOpenPullRequest = async (): Promise<string | undefined> => {
-      const listed = await runFile("gh", [
-        "pr",
-        "list",
-        "--repo",
-        repository.origin,
-        "--state",
-        "open",
-        "--head",
-        prepared.pushBranch,
-        "--json",
-        "url",
-      ]);
-      const open = JSON.parse(listed.stdout) as Array<{ url: string }>;
-      return open[0]?.url;
-    };
-    const open = await findOpenPullRequest();
+    const open = await this.#findOpenPullRequest(
+      prepared.pushBranch,
+      repository,
+    );
     if (open) return open;
 
+    try {
+      return await this.#createDraft(prepared, task, repository, input);
+    } catch (error) {
+      const reconciled = await this.#findOpenPullRequest(
+        prepared.pushBranch,
+        repository,
+      );
+      if (!reconciled) {
+        throw new Error(
+          `Draft pull request creation failed and no matching PR was found: ${safeErrorMessage(error)}`,
+        );
+      }
+      await this.#logger.log(
+        "Draft PR creation reported an error, but exact branch lookup found the created PR.",
+      );
+      return reconciled;
+    }
+  }
+
+  async #findOpenPullRequest(
+    headBranch: string,
+    repository: RepositoryConfig,
+  ): Promise<string | undefined> {
+    const listed = await runFile("gh", [
+      "pr",
+      "list",
+      "--repo",
+      repository.origin,
+      "--state",
+      "open",
+      "--head",
+      headBranch,
+      "--json",
+      "url",
+    ]);
+    const open = JSON.parse(listed.stdout) as Array<{ url: string }>;
+    return open[0]?.url;
+  }
+
+  async #createDraft(
+    prepared: PreparedWorktree,
+    task: ApprovedTask,
+    repository: RepositoryConfig,
+    input: PublicationInput,
+  ): Promise<string> {
     const bodyDirectory = await mkdtemp(path.join(os.tmpdir(), "cursor-bridge-pr-"));
     const bodyFile = path.join(bodyDirectory, "body.md");
     try {
-      const body = [
-        `승인된 작업 \`${task.id}\`의 자동 구현 결과입니다.`,
-        "",
-        "## 인수 조건",
-        ...task.acceptance_criteria.map((item) => `- ${item}`),
-        "",
-        "## 독립 검증",
-        ...input.verification.map((item) =>
-          `- ${item.status === "passed" ? "PASS" : "FAIL"}: \`${item.command}\``,
-        ),
-        "",
-        `- 후보 트리: \`${input.tree.treeHash}\``,
-        `- 패치 증명: \`${input.tree.patchHash}\``,
-        "",
-        "Codex Cursor Bridge가 생성했습니다. 리뷰 완료 전까지 Draft 상태를 유지해야 합니다.",
-      ].join("\n");
-      await writeFile(bodyFile, body, { encoding: "utf8", mode: 0o600 });
+      await writeFile(
+        bodyFile,
+        draftPullRequestBody(task, input),
+        { encoding: "utf8", mode: 0o600 },
+      );
       const created = await runFile("gh", [
         "pr",
         "create",
@@ -199,17 +240,6 @@ export class GitHubPullRequestAdapter {
         bodyFile,
       ]);
       return created.stdout.trim();
-    } catch (error) {
-      const reconciled = await findOpenPullRequest();
-      if (!reconciled) {
-        throw new Error(
-          `Draft pull request creation failed and no matching PR was found: ${safeErrorMessage(error)}`,
-        );
-      }
-      await this.#logger.log(
-        "Draft PR creation reported an error, but exact branch lookup found the created PR.",
-      );
-      return reconciled;
     } finally {
       await rm(bodyDirectory, { recursive: true, force: true });
     }

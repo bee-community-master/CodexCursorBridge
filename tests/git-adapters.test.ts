@@ -1,5 +1,5 @@
-import { mkdir, rm } from "node:fs/promises";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdir, rm, symlink } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import type { Job, JobStore } from "../src/state.js";
 import {
@@ -90,6 +90,10 @@ beforeEach(async () => {
   await rm(paths.worktreesDir, { recursive: true, force: true });
 });
 
+afterEach(async () => {
+  await rm(paths.worktreesDir, { recursive: true, force: true });
+});
+
 describe("Git and GitHub adapters", () => {
   it("rejects a changed worktree Git metadata pointer before collecting changes", async () => {
     mocks.assertWorktreeIdentity.mockRejectedValue(
@@ -133,12 +137,25 @@ describe("Git and GitHub adapters", () => {
     expect(mocks.collectChanges).not.toHaveBeenCalled();
   });
 
+  it("rejects a worktree request for a job outside the adapter scope", async () => {
+    mocks.git.mockResolvedValue("");
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+
+    await expect(adapter.prepare(
+      { id: "different-job" },
+      task({ mode: "new_draft" }),
+      repository,
+    )).rejects.toThrow(/adapter job scope/i);
+
+    expect(mocks.git).not.toHaveBeenCalled();
+    expect(store.update).not.toHaveBeenCalled();
+  });
+
   it("creates a collision-resistant new draft branch", async () => {
     mocks.git.mockImplementation(async (_cwd: string, ...args: string[]) => {
-      if (args[0] === "show-ref") throw new Error("missing");
       return args[0] === "rev-parse" ? "b".repeat(40) : "";
     });
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+    const adapter = new RealWorkflowAdapter(paths, config, store, "12345678-abcd");
     const approved = task({ mode: "new_draft" });
     const prepared = await adapter.prepare({ id: "12345678-abcd" }, approved, repository);
     expect(prepared.pushBranch).toBe("codex/cursor/task-demo-demo-change-v2-12345678");
@@ -155,11 +172,42 @@ describe("Git and GitHub adapters", () => {
     );
   });
 
-  it("records a newly created worktree before identity validation can fail", async () => {
+  it("propagates local branch lookup failures instead of treating them as a missing branch", async () => {
     mocks.git.mockImplementation(async (_cwd: string, ...args: string[]) => {
-      if (args[0] === "show-ref") throw new Error("missing");
+      if (args[0] === "for-each-ref") {
+        throw new Error("Git reference database is unavailable");
+      }
       return "";
     });
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+
+    await expect(adapter.prepare(
+      { id: "job" },
+      task({ mode: "new_draft" }),
+      repository,
+    )).rejects.toThrow(/reference database is unavailable/i);
+
+    expect(mocks.git.mock.calls.some(([, ...args]) => args.includes("worktree"))).toBe(false);
+  });
+
+  it("propagates worktree access failures instead of treating them as a missing directory", async () => {
+    const worktree = path.join(paths.worktreesDir, "demo", "job");
+    await mkdir(path.dirname(worktree), { recursive: true });
+    await symlink("job", worktree);
+    mocks.git.mockResolvedValue("");
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+
+    await expect(adapter.prepare(
+      { id: "job" },
+      task({ mode: "new_draft" }),
+      repository,
+    )).rejects.toMatchObject({ code: "ELOOP" });
+
+    expect(mocks.git).not.toHaveBeenCalled();
+  });
+
+  it("records a newly created worktree before identity validation can fail", async () => {
+    mocks.git.mockResolvedValue("");
     mocks.captureWorktreeIdentity.mockRejectedValue(
       new Error("Worktree Git metadata identity could not be verified"),
     );
@@ -219,10 +267,9 @@ describe("Git and GitHub adapters", () => {
       stderr: "",
     });
     mocks.git.mockImplementation(async (_cwd: string, ...args: string[]) => {
-      if (args[0] === "show-ref") throw new Error("missing");
       return args[0] === "rev-parse" ? "b".repeat(40) : "";
     });
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+    const adapter = new RealWorkflowAdapter(paths, config, store, "12345678-abcd");
     const approved = task({ mode: "existing_pr", number: 7 });
     const prepared = await adapter.prepare({ id: "12345678-abcd" }, approved, repository);
     expect(prepared.pushBranch).toBe("feature/existing");
@@ -253,7 +300,7 @@ describe("Git and GitHub adapters", () => {
       stderr: "",
     });
     mocks.git.mockResolvedValue("");
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+    const adapter = new RealWorkflowAdapter(paths, config, store, "12345678-abcd");
 
     await expect(adapter.prepare(
       { id: "12345678-abcd" },
@@ -278,7 +325,6 @@ describe("Git and GitHub adapters", () => {
       stderr: "",
     });
     mocks.git.mockImplementation(async (_cwd: string, ...args: string[]) => {
-      if (args[0] === "show-ref") throw new Error("missing");
       return args[0] === "rev-parse" ? approved.target.base_sha : "";
     });
     const adapter = new RealWorkflowAdapter(paths, config, store, "job");
@@ -301,7 +347,7 @@ describe("Git and GitHub adapters", () => {
       stderr: "",
     });
     mocks.git.mockResolvedValue("");
-    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+    const adapter = new RealWorkflowAdapter(paths, config, store, "12345678-abcd");
 
     await expect(adapter.prepare(
       { id: "12345678-abcd" },
@@ -339,7 +385,9 @@ describe("Git and GitHub adapters", () => {
       return undefined;
     });
     mocks.git.mockImplementation(async (_cwd: string, ...args: string[]) => {
-      if (args[0] === "show-ref") return publishedHead;
+      if (args[0] === "for-each-ref") {
+        return "refs/heads/codex/cursor/task-demo-followup-job";
+      }
       if (args[0] === "rev-parse" && args[1] === "HEAD^{tree}") return publishedTree;
       if (args[0] === "rev-parse") return publishedHead;
       if (args[0] === "cat-file") {

@@ -81,4 +81,24 @@ describe("verification sandbox", () => {
 
     expect(invocation.env.PATH).toBe("/usr/bin");
   });
+
+  it("fails closed when a sandbox root cannot be canonicalized", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "cursor-sandbox-loop-"));
+    const worktree = path.join(directory, "worktree");
+    await symlink("worktree", worktree);
+
+    let failure: unknown;
+    try {
+      createVerificationSandbox({
+        worktree,
+        scratchDir: path.join(directory, "scratch"),
+        command: "node",
+        args: [],
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({ code: "ELOOP" });
+  });
 });

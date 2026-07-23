@@ -62,6 +62,10 @@ const allowedAttemptTransitions: Record<AttemptStatus, ReadonlySet<AttemptStatus
   SCOPE_VIOLATION: new Set(),
 };
 
+export const terminalAttemptStatuses: ReadonlySet<AttemptStatus> = new Set(
+  attemptStatuses.filter((status) => allowedAttemptTransitions[status].size === 0),
+);
+
 export function canTransitionAttempt(from: AttemptStatus, to: AttemptStatus): boolean {
   return from === to || allowedAttemptTransitions[from].has(to);
 }

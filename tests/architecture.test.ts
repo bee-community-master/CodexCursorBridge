@@ -1,11 +1,25 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { preProcessFile } from "typescript";
+import {
+  createSourceFile,
+  forEachChild,
+  isArrowFunction,
+  isConstructorDeclaration,
+  isFunctionDeclaration,
+  isFunctionExpression,
+  isGetAccessorDeclaration,
+  isMethodDeclaration,
+  isSetAccessorDeclaration,
+  preProcessFile,
+  ScriptTarget,
+  type Node,
+} from "typescript";
 import { describe, expect, it } from "vitest";
 
 const sourceRoot = path.resolve("src");
 const testRoot = path.resolve("tests");
 const maximumImplementationLines = 700;
+const maximumFunctionLines = 180;
 const maximumTestLines = 900;
 
 async function typescriptFiles(directory: string): Promise<string[]> {
@@ -48,6 +62,36 @@ describe("architecture boundaries", () => {
     }
 
     expect(oversized, "split files by responsibility instead of growing God modules")
+      .toEqual([]);
+  });
+
+  it("keeps individual functions small enough to review as one unit", async () => {
+    const oversized: string[] = [];
+    for (const file of await sourceFiles()) {
+      const source = await readFile(file, "utf8");
+      const syntax = createSourceFile(file, source, ScriptTarget.Latest, true);
+      const visit = (node: Node): void => {
+        const functionLike = isFunctionDeclaration(node)
+          || isMethodDeclaration(node)
+          || isArrowFunction(node)
+          || isFunctionExpression(node)
+          || isConstructorDeclaration(node)
+          || isGetAccessorDeclaration(node)
+          || isSetAccessorDeclaration(node);
+        if (functionLike && node.body) {
+          const start = syntax.getLineAndCharacterOfPosition(node.getStart(syntax)).line + 1;
+          const end = syntax.getLineAndCharacterOfPosition(node.end).line + 1;
+          const lines = end - start + 1;
+          if (lines > maximumFunctionLines) {
+            oversized.push(`${displayPath(file)}:${start} (${lines})`);
+          }
+        }
+        forEachChild(node, visit);
+      };
+      visit(syntax);
+    }
+
+    expect(oversized, "extract named phases instead of growing orchestration functions")
       .toEqual([]);
   });
 

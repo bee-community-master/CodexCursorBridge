@@ -24,8 +24,14 @@ function canonicalRoot(value: string): string {
   const resolved = path.resolve(value);
   try {
     return realpathSync.native(resolved);
-  } catch {
-    return resolved;
+  } catch (error) {
+    if (
+      error instanceof Error
+      && (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return resolved;
+    }
+    throw error;
   }
 }
 

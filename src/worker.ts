@@ -12,8 +12,11 @@ import type {
   RuntimePaths,
 } from "./domain/configuration.js";
 import {
+  terminalAttemptStatuses,
   terminalJobStatuses,
+  type Attempt,
   type ClaimedWork,
+  type Job,
 } from "./domain/job.js";
 import { safeErrorMessage } from "./redaction.js";
 import { RealWorkflowAdapter } from "./real-adapter.js";
@@ -38,6 +41,29 @@ const defaultWorkerDependencies: WorkerDependencies = {
     new RealWorkflowAdapter(paths, config, store, jobId),
   executeWorkflow,
 };
+
+interface CurrentClaimState {
+  job: Job | undefined;
+  attempt: Attempt | undefined;
+}
+
+function readCurrentClaimState(
+  store: WorkerStatePort,
+  jobId: string,
+): CurrentClaimState {
+  const job = store.get(jobId);
+  const attempt = job?.currentAttemptId
+    ? store.getAttempt(job.currentAttemptId)
+    : undefined;
+  return { job, attempt };
+}
+
+function claimLeaseWasReplaced(
+  attempt: Attempt | undefined,
+  workerToken: string,
+): boolean {
+  return attempt !== undefined && attempt.workerToken !== workerToken;
+}
 
 async function confirmPendingCancellation(
   store: WorkerStatePort,
@@ -116,6 +142,115 @@ async function tryWritePreflightReport(
   }
 }
 
+async function handleTaskLoadFailure(
+  store: WorkerStatePort,
+  claim: ClaimedWork,
+  adapter: WorkflowAdapter,
+  reportsDir: string,
+  error: unknown,
+): Promise<void> {
+  const message = safeErrorMessage(error);
+  const current = readCurrentClaimState(store, claim.job.id);
+  if (claimLeaseWasReplaced(current.attempt, claim.attempt.workerToken)) return;
+  if (current.job?.status === "CANCEL_REQUESTED") {
+    await confirmPendingCancellation(
+      store,
+      adapter,
+      claim.job.id,
+      claim.attempt.workerToken,
+    );
+  } else if (
+    current.job
+    && !terminalJobStatuses.has(current.job.status)
+  ) {
+    store.failStaleSpec(
+      claim.job.id,
+      claim.attempt.id,
+      claim.attempt.workerToken,
+      message,
+    );
+  }
+  await tryWritePreflightReport(
+    reportsDir,
+    store,
+    claim.job.id,
+    message,
+  );
+}
+
+function markUnexpectedWorkerFailure(
+  store: WorkerStatePort,
+  current: CurrentClaimState,
+  jobId: string,
+  message: string,
+): boolean {
+  if (!current.job || terminalJobStatuses.has(current.job.status)) return true;
+  if (
+    current.attempt
+    && !terminalAttemptStatuses.has(current.attempt.status)
+  ) {
+    try {
+      store.transitionAttempt(
+        current.attempt.id,
+        current.attempt.workerToken,
+        [current.attempt.status],
+        "FAILED",
+        { errorMessage: message },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  if (current.attempt) return false;
+  try {
+    store.transitionJob(
+      jobId,
+      [current.job.status],
+      "FAILED",
+      { errorMessage: message },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function handleWorkerFailure(
+  store: WorkerStatePort,
+  claim: ClaimedWork,
+  adapter: WorkflowAdapter | undefined,
+  reportsDir: string,
+  error: unknown,
+): Promise<void> {
+  const message = safeErrorMessage(error);
+  const current = readCurrentClaimState(store, claim.job.id);
+  if (claimLeaseWasReplaced(current.attempt, claim.attempt.workerToken)) return;
+  if (current.job?.status === "CANCEL_REQUESTED") {
+    await confirmPendingCancellation(
+      store,
+      adapter,
+      claim.job.id,
+      claim.attempt.workerToken,
+    );
+  } else if (
+    !markUnexpectedWorkerFailure(
+      store,
+      current,
+      claim.job.id,
+      message,
+    )
+  ) {
+    return;
+  }
+  await tryWritePreflightReport(
+    reportsDir,
+    store,
+    claim.job.id,
+    message,
+  );
+}
+
 export async function processClaim(
   store: WorkerStatePort,
   claim: ClaimedWork,
@@ -135,67 +270,23 @@ export async function processClaim(
     try {
       task = await dependencies.loadJobTask(paths, repository, claim.job);
     } catch (error) {
-      const message = safeErrorMessage(error);
-      const current = store.get(jobId);
-      const currentAttempt = current?.currentAttemptId
-        ? store.getAttempt(current.currentAttemptId)
-        : undefined;
-      if (
-        currentAttempt
-        && currentAttempt.workerToken !== claim.attempt.workerToken
-      ) return;
-      if (current?.status === "CANCEL_REQUESTED") {
-        await confirmPendingCancellation(store, adapter, jobId, claim.attempt.workerToken);
-      } else if (current && !terminalJobStatuses.has(current.status)) {
-        store.failStaleSpec(
-          jobId,
-          claim.attempt.id,
-          claim.attempt.workerToken,
-          message,
-        );
-      }
-      await tryWritePreflightReport(paths.reportsDir, store, jobId, message);
+      await handleTaskLoadFailure(
+        store,
+        claim,
+        adapter,
+        paths.reportsDir,
+        error,
+      );
       return;
     }
     await dependencies.executeWorkflow(store, claim, task, repository, adapter);
   } catch (error) {
-    const message = safeErrorMessage(error);
-    const current = store.get(jobId);
-    const currentAttempt = current?.currentAttemptId
-      ? store.getAttempt(current.currentAttemptId)
-      : undefined;
-    if (
-      currentAttempt
-      && currentAttempt.workerToken !== claim.attempt.workerToken
-    ) return;
-    if (current?.status === "CANCEL_REQUESTED") {
-      await confirmPendingCancellation(store, adapter, jobId, claim.attempt.workerToken);
-    } else if (current && !terminalJobStatuses.has(current.status)) {
-      if (
-        currentAttempt
-        && !["FAILED", "BLOCKED", "CANCELLED", "SCOPE_VIOLATION", "COMPLETED"].includes(currentAttempt.status)
-      ) {
-        try {
-          store.transitionAttempt(
-            currentAttempt.id,
-            currentAttempt.workerToken,
-            [currentAttempt.status],
-            "FAILED",
-            { errorMessage: message },
-          );
-        } catch {
-          return;
-        }
-      } else if (!currentAttempt) {
-        try {
-          store.transitionJob(jobId, [current.status], "FAILED", { errorMessage: message });
-        } catch {
-          return;
-        }
-      } else {
-        return;
-      }
-    }
-    await tryWritePreflightReport(paths.reportsDir, store, jobId, message);
+    await handleWorkerFailure(
+      store,
+      claim,
+      adapter,
+      paths.reportsDir,
+      error,
+    );
   }
 }
