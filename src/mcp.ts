@@ -1,5 +1,3 @@
-import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,26 +5,34 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadMachineConfig, runtimePaths } from "./config.js";
-import { git } from "./git.js";
+import { resolveCommittedTask } from "./dispatch.js";
+import { wakeSupervisor } from "./launchd.js";
 import { errorResponse, successResponse, warningResponse, type ToolResponse } from "./response.js";
-import { JobStore, type Job } from "./state.js";
-import { assertApprovedTask, loadTaskFile } from "./task.js";
+import { JobStore, terminalJobStatuses, type Job } from "./state.js";
 
 const inferredRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const paths = runtimePaths(process.env.CURSOR_BRIDGE_ROOT ?? inferredRoot);
 const store = new JobStore(paths.databaseFile);
-const terminal = new Set(["DONE", "BLOCKED", "FAILED", "CANCELLED", "STALE_SPEC", "SCOPE_VIOLATION"]);
-
 function jobResponse(job: Job, summary: string): ToolResponse {
+  const attempt = job.currentAttemptId ? store.getAttempt(job.currentAttemptId) : undefined;
   const artifacts: Record<string, string> = {};
   if (job.logPath) artifacts.log = job.logPath;
   if (job.reportPath) artifacts.report = job.reportPath;
-  if (job.worktree) artifacts.worktree = job.worktree;
+  const worktree = attempt?.worktree ?? job.worktree;
+  if (worktree && job.cleanupStatus !== "COMPLETED") artifacts.worktree = worktree;
   if (job.prUrl) artifacts.pr = job.prUrl;
+  if (job.attestationPath) artifacts.attestation = job.attestationPath;
+  const nextActions = job.status === "DELIVERED_REVIEW_REQUIRED"
+    ? ["Review the Draft PR, report, and attestation before marking it ready."]
+    : terminalJobStatuses.has(job.status)
+      ? job.reportPath ? [] : ["Call cursor_get_report after the report becomes available."]
+      : ["Call cursor_get_task with this jobId to continue monitoring."];
   return {
-    ...successResponse(summary, terminal.has(job.status) ? [] : ["Call cursor_get_task with this jobId to continue monitoring."], artifacts),
+    ...successResponse(summary, nextActions, artifacts),
     jobId: job.id, jobStatus: job.status, repositoryAlias: job.repositoryAlias, taskId: job.taskId,
-    cursorAgentId: job.cursorAgentId, cursorRunId: job.cursorRunId, prUrl: job.prUrl,
+    cursorAgentId: attempt?.cursorAgentId ?? job.cursorAgentId,
+    cursorRunId: attempt?.cursorRunId ?? job.cursorRunId,
+    prUrl: job.prUrl,
     errorMessage: job.errorMessage,
   };
 }
@@ -49,7 +55,7 @@ async function waitForChange(jobId: string, initialUpdatedAt: string, waitSecond
 }
 
 const server = new McpServer(
-  { name: "cursor-bridge", version: "0.1.0" },
+  { name: "cursor-bridge", version: "0.2.0" },
   { instructions: "Only approved, committed Task IDs may be started. Start once, monitor by job ID, and report exact failures without changing the task contract." },
 );
 
@@ -65,33 +71,24 @@ server.registerTool("cursor_start_task", {
 }, async ({ repositoryAlias, taskId, specVersion, specHash }) => {
   try {
     const config = await loadMachineConfig(paths.configFile);
-    if (!config.repositories[repositoryAlias]) throw new Error(`Repository alias is not registered: ${repositoryAlias}`);
-    const taskFile = path.join(paths.tasksDir, repositoryAlias, `${taskId}.yaml`);
-    const task = await loadTaskFile(taskFile);
-    if (task.id !== taskId || task.repository !== repositoryAlias) throw new Error("Task identity does not match the request");
-    assertApprovedTask(task, specVersion, specHash);
-    const relativeTask = path.relative(paths.projectRoot, taskFile);
-    await git(paths.projectRoot, "ls-files", "--error-unmatch", relativeTask);
-    if (await git(paths.projectRoot, "status", "--porcelain", "--", relativeTask)) {
-      throw new Error("Approved task file must be committed and clean");
+    const repository = config.repositories[repositoryAlias];
+    if (!repository) {
+      throw new Error(`Repository alias is not registered: ${repositoryAlias}`);
     }
-    let job = store.createOrGet({ repositoryAlias, taskId, specVersion, specHash });
-    if (job.status === "QUEUED" && !job.pid) {
-      mkdirSync(paths.logsDir, { recursive: true, mode: 0o700 });
-      const logPath = path.join(paths.logsDir, `${job.id}.log`);
-      const fd = openSync(logPath, "a", 0o600);
-      const workerPath = path.join(paths.projectRoot, "dist", "worker.js");
-      const child = spawn(process.execPath, [workerPath, job.id], {
-        cwd: paths.projectRoot,
-        env: { ...process.env, CURSOR_BRIDGE_ROOT: paths.projectRoot, CURSOR_BRIDGE_HOME: paths.home },
-        detached: true,
-        stdio: ["ignore", fd, fd],
-      });
-      closeSync(fd);
-      child.unref();
-      store.update(job.id, { ...(child.pid === undefined ? {} : { pid: child.pid }), logPath });
+    const resolved = await resolveCommittedTask(
+      paths,
+      repository,
+      repositoryAlias,
+      taskId,
+      specVersion,
+      specHash,
+    );
+    let job = store.createOrGet(resolved.createJobInput);
+    if (!job.logPath) {
+      store.update(job.id, { logPath: path.join(paths.logsDir, `${job.id}.log`) });
       job = store.get(job.id)!;
     }
+    if (!terminalJobStatuses.has(job.status)) await wakeSupervisor();
     return toolResult(jobResponse(job, `Cursor task ${taskId} is ${job.status.toLowerCase()}.`));
   } catch (error) {
     return toolResult(errorResponse(
@@ -117,15 +114,30 @@ server.registerTool("cursor_cancel_task", {
   description: "Cancel an active Cursor Bridge job without terminating unrelated processes.",
   inputSchema: z.object({ jobId: z.string().uuid() }),
   annotations: { destructiveHint: true, idempotentHint: true },
-}, ({ jobId }) => {
+}, async ({ jobId }) => {
   const job = store.get(jobId);
   if (!job) return toolResult(errorResponse("Job was not found.", `Unknown job: ${jobId}`, "Check the job ID and retry.", "Stop if no matching start result exists."));
-  if (terminal.has(job.status)) return toolResult(warningResponse(`Job is already terminal: ${job.status}`, [], job.reportPath ? { report: job.reportPath } : {}));
-  if (job.pid) {
-    try { process.kill(job.pid, "SIGTERM"); } catch { /* The worker may have exited between status read and signal. */ }
+  if (terminalJobStatuses.has(job.status)) {
+    return toolResult(warningResponse(
+      `Job is already terminal: ${job.status}`,
+      [],
+      job.reportPath ? { report: job.reportPath } : {},
+    ));
   }
-  const cancelled = store.transition(jobId, "CANCELLED", { errorMessage: "Cancelled by user request" });
-  return toolResult(jobResponse(cancelled, "Cursor task was cancelled."));
+  const requested = store.requestCancellation(jobId);
+  try {
+    await wakeSupervisor();
+  } catch (error) {
+    store.recordEvent(jobId, requested.currentAttemptId, "SUPERVISOR_WAKE_FAILED", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return toolResult(jobResponse(
+    requested,
+    requested.status === "CANCELLED"
+      ? "Queued Cursor task was cancelled."
+      : "Cursor task cancellation was requested and awaits worker confirmation.",
+  ));
 });
 
 server.registerTool("cursor_get_report", {

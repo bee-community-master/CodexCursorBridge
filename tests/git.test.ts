@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { collectChanges } from "../src/git.js";
+import { collectChanges, computeCandidateTree, git } from "../src/git.js";
 
 const exec = promisify(execFile);
 
@@ -27,5 +27,10 @@ describe("Git change collection", () => {
     expect(changes.files.sort()).toEqual(["a.ts", "gone.test.ts", "new.ts"]);
     expect(changes.deletedFiles).toEqual(["gone.test.ts"]);
     expect(changes.diffLines).toBeGreaterThanOrEqual(3);
-  });
+
+    const candidate = await computeCandidateTree(root);
+    expect(candidate.treeHash).toMatch(/^[a-f0-9]{40,64}$/);
+    expect(candidate.patchHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(await git(root, "status", "--porcelain")).toContain("?? new.ts");
+  }, 15_000);
 });

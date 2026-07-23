@@ -13,6 +13,9 @@ describe("Cursor Bridge plugin delegation contract", () => {
 
     expect(skill).toContain("Call `cursor_start_task` directly");
     expect(skill).toContain("returns a job ID without waiting for Cursor");
+    expect(skill).toContain("launchd-managed durable supervisor");
+    expect(skill).toContain("DELIVERED_REVIEW_REQUIRED");
+    expect(skill).toContain("attestation");
     expect(skill).not.toMatch(/spawn the `cursor` role/i);
     expect(skill).not.toMatch(/custom agent/i);
   });

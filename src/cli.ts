@@ -3,9 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bootstrap, uninstall } from "./bootstrap.js";
 import { addRepository, loadMachineConfig, runtimePaths, saveMachineConfig } from "./config.js";
-import { git, githubOriginSlug, runFile } from "./git.js";
+import { computeContextDigest, git, githubOriginSlug, runFile } from "./git.js";
 import { readCursorApiKey } from "./keychain.js";
-import { approveTaskFile } from "./task.js";
+import { JobStore } from "./state.js";
+import { approveTaskFile, loadTaskFile } from "./task.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -38,7 +39,58 @@ async function addRepo(args: string[]): Promise<void> {
 async function approve(args: string[]): Promise<void> {
   const alias = option(args, "--repository");
   const taskId = option(args, "--task");
-  const task = await approveTaskFile(path.join(projectRoot, "tasks", alias, `${taskId}.yaml`));
+  const paths = runtimePaths(projectRoot);
+  const config = await loadMachineConfig(paths.configFile);
+  const repository = config.repositories[alias];
+  if (!repository) throw new Error(`Repository alias is not registered: ${alias}`);
+  const taskFile = path.join(paths.tasksDir, alias, `${taskId}.yaml`);
+  const draft = await loadTaskFile(taskFile);
+  if (draft.id !== taskId || draft.repository !== alias) {
+    throw new Error("Task identity does not match the approval request");
+  }
+  const actualOrigin = githubOriginSlug(await git(repository.root, "remote", "get-url", "origin"));
+  if (actualOrigin !== repository.origin) {
+    throw new Error("Registered repository origin no longer matches its Git remote");
+  }
+  await git(repository.root, "fetch", "--prune", "origin");
+  let baseRef = repository.defaultBranch;
+  let baseSha: string;
+  if (draft.pull_request.mode === "existing_pr") {
+    const output = await runFile("gh", [
+      "pr",
+      "view",
+      String(draft.pull_request.number),
+      "--repo",
+      repository.origin,
+      "--json",
+      "state,headRefName,headRefOid,headRepository",
+    ]);
+    const info = JSON.parse(output.stdout) as {
+      state: string;
+      headRefName: string;
+      headRefOid: string;
+      headRepository: { nameWithOwner: string };
+    };
+    if (info.state !== "OPEN") throw new Error("Existing pull request is not open");
+    if (info.headRepository.nameWithOwner !== repository.origin) {
+      throw new Error("Existing pull request head must be in the registered repository");
+    }
+    baseRef = info.headRefName;
+    baseSha = info.headRefOid;
+  } else {
+    baseSha = await git(repository.root, "rev-parse", `origin/${baseRef}`);
+  }
+  const contextDigest = await computeContextDigest(
+    repository.root,
+    baseSha,
+    draft.context_files,
+  );
+  const task = await approveTaskFile(taskFile, {
+    origin: repository.origin,
+    baseRef,
+    baseSha,
+    contextDigest,
+  });
   process.stdout.write(`${task.id} approved at v${task.spec_version}: ${task.spec_hash}\nCommit this Task file before dispatch.\n`);
 }
 
@@ -46,6 +98,16 @@ async function listModels(): Promise<void> {
   const apiKey = await readCursorApiKey();
   const models = await Cursor.models.list({ apiKey });
   for (const model of models) process.stdout.write(`${model.id}\t${model.displayName}\n`);
+}
+
+function printStats(): void {
+  const paths = runtimePaths(projectRoot);
+  const store = new JobStore(paths.databaseFile);
+  try {
+    process.stdout.write(`${JSON.stringify(store.metrics(), null, 2)}\n`);
+  } finally {
+    store.close();
+  }
 }
 
 async function main(): Promise<void> {
@@ -56,7 +118,8 @@ async function main(): Promise<void> {
     case "repo:add": await addRepo(args); break;
     case "task:approve": await approve(args); break;
     case "models:list": await listModels(); break;
-    default: throw new Error("Usage: cli.ts <bootstrap|uninstall|repo:add|task:approve|models:list>");
+    case "stats": printStats(); break;
+    default: throw new Error("Usage: cli.ts <bootstrap|uninstall|repo:add|task:approve|models:list|stats>");
   }
 }
 

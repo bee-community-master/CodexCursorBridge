@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { assertRelativeRepoPath } from "./paths.js";
@@ -11,12 +13,18 @@ export interface CommandResult { stdout: string; stderr: string }
 export async function runFile(
   command: string,
   args: readonly string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
+  options: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<CommandResult> {
   const result = await exec(command, [...args], {
     cwd: options.cwd,
     env: options.env,
     timeout: options.timeoutMs,
+    signal: options.signal,
     maxBuffer: 20 * 1024 * 1024,
     encoding: "utf8",
   });
@@ -47,6 +55,11 @@ export interface CollectedChanges {
   diffLines: number;
 }
 
+export interface CandidateTree {
+  treeHash: string;
+  patchHash: string;
+}
+
 export async function collectChanges(root: string, baseSha: string): Promise<CollectedChanges> {
   const tracked = splitZero(await git(root, "diff", "--name-only", "-z", baseSha));
   const untracked = splitZero(await git(root, "ls-files", "--others", "--exclude-standard", "-z"));
@@ -58,6 +71,38 @@ export async function collectChanges(root: string, baseSha: string): Promise<Col
   }, 0);
   diffLines += await countUntrackedLines(root, untracked);
   return { files: [...new Set([...tracked, ...untracked])].sort(), deletedFiles, diffLines };
+}
+
+export async function computeCandidateTree(root: string, approvedBaseSha?: string): Promise<CandidateTree> {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "cursor-bridge-index-"));
+  const indexFile = path.join(temporary, "index");
+  const env = { ...process.env, GIT_INDEX_FILE: indexFile };
+  try {
+    await runFile("git", ["-C", root, "read-tree", "HEAD"], { env });
+    await runFile("git", ["-C", root, "add", "-A"], { env });
+    const treeHash = (await runFile("git", ["-C", root, "write-tree"], { env })).stdout.trim();
+    const baseSha = approvedBaseSha ?? await git(root, "rev-parse", "HEAD");
+    const patchHash = `sha256:${createHash("sha256")
+      .update(`${baseSha}\0${treeHash}`)
+      .digest("hex")}`;
+    return { treeHash, patchHash };
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+export async function computeContextDigest(
+  root: string,
+  baseSha: string,
+  files: readonly string[],
+): Promise<string> {
+  const hash = createHash("sha256");
+  for (const input of [...files].sort()) {
+    const file = assertRelativeRepoPath(input);
+    const blobSha = await git(root, "rev-parse", `${baseSha}:${file}`);
+    hash.update(file).update("\0").update(blobSha).update("\0");
+  }
+  return `sha256:${hash.digest("hex")}`;
 }
 
 export function githubOriginSlug(originUrl: string): string {

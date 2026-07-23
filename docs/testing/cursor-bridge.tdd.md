@@ -9,6 +9,7 @@ The source was the approved implementation plan in the Codex task. It was normal
 3. Cursor changes stay in an isolated worktree and cannot publish outside the approved scope.
 4. Passing Cursor prose is insufficient; Bridge verification must pass before commit, push, or draft PR.
 5. Another Mac can clone the repository and bootstrap the same direct main-agent MCP registration without copying secrets or absolute paths.
+6. A supervisor crash, duplicate delivery effect, or cancellation request cannot silently create a second attempt, publish an unverified tree, or report cancellation before confirmation.
 
 ## RED/GREEN checkpoints
 
@@ -26,36 +27,36 @@ The source was the approved implementation plan in the Codex task. It was normal
 | GREEN: direct main MCP | `624a016` | Main MCP registration, clone-path update, legacy-role migration, and unmanaged-registration protection passed. |
 | RED: direct delegation guidance | `b10e29b` | Plugin contract test failed because the skill still instructed Codex to spawn the custom role. |
 | GREEN: direct delegation guidance | Current branch | Plugin skill now starts an asynchronous job directly and avoids continuous polling. |
+| RED: durable controller | Current branch | New approval binding, lease recovery, confirmed cancellation, post-verification scope, sandbox, attestation, and idempotent publication tests initially failed against the detached-worker implementation. |
+| GREEN: durable controller | Current branch | SQLite schema v3, launchd supervisor, structured outcomes, bounded repair, final-tree attestation, and publication readback pass the full gate. |
 
 ## Guarantees
 
 | # | Guarantee | Test or command | Type | Result |
 |---|---|---|---|---|
-| 1 | Task approval persists a stable SHA-256 spec hash and rejects stale versions/hashes. | `tests/task.test.ts` | Unit | PASS |
+| 1 | Task approval binds a stable spec hash to target origin/base SHA, context blobs, policy version, and verification profile. | `tests/task.test.ts`, `tests/dispatch.test.ts` | Integration | PASS |
 | 2 | Traversal, forbidden paths, out-of-scope paths, oversized diffs, and deleted tests block publication. | `tests/paths.test.ts`, `tests/verification.test.ts` | Unit | PASS |
-| 3 | SQLite jobs deduplicate identical specs and enforce legal state transitions. | `tests/state.test.ts` | Integration | PASS |
+| 3 | SQLite jobs preserve immutable task provenance and atomically manage Job/Attempt/Event/Lease/Effect state, recovery, confirmed cancellation, and local effectiveness metrics. | `tests/state.test.ts` | Integration | PASS |
 | 4 | Tracked edits, deletions, and untracked files are all included in independent verification. | `tests/git.test.ts` | Integration | PASS |
-| 5 | Publication occurs only after Bridge verification; scope violations preserve the worktree. | `tests/workflow.test.ts` | Integration with fake adapter | PASS |
-| 6 | New and existing-PR worktree bases use collision-resistant or verified same-repository branches. | `tests/real-adapter.test.ts` | Integration with fake Git/GitHub | PASS |
-| 7 | Bootstrap exposes exactly four MCP tools to the main Codex agent, preserves existing config across clone paths, migrates the managed legacy role, and refuses to overwrite an unmanaged registration. | `tests/bootstrap.test.ts`, `tests/managed-config.test.ts` | Integration | PASS |
+| 5 | Publication occurs only after independent verification and a second scope check; one bounded repair gets exact verifier evidence and a reclaimed verifier does not rerun implementation. | `tests/workflow.test.ts` | Integration with fake adapter | PASS |
+| 6 | Worktrees start at the approved SHA, implementer-owned commits are rejected, and commit/push/PR results are read back against the attested tree. | `tests/real-adapter.test.ts`, `tests/git.test.ts` | Integration with fake Git/GitHub | PASS |
+| 7 | Bootstrap exposes exactly four MCP tools and installs an owner-local launchd supervisor without credentials in its environment. | `tests/bootstrap.test.ts`, `tests/managed-config.test.ts`, `tests/launchd.test.ts` | Integration | PASS |
 | 8 | The built MCP server initializes and lists exactly start/status/cancel/report. | `pnpm smoke:mcp` | Protocol smoke | PASS |
-| 9 | Plugin and delegation skill match Codex schemas and direct asynchronous delegation guidance. | `tests/plugin.test.ts`, plugin validator, skill quick validator | Packaging | PASS |
+| 9 | Plugin and delegation skill describe durable supervisor execution, `DELIVERED_REVIEW_REQUIRED`, and attestation review. | `tests/plugin.test.ts`, plugin validator, skill quick validator | Packaging | PASS |
 | 10 | No known dependency advisories remain. | `pnpm audit` | Security | PASS |
+| 11 | Verifier processes receive a credential-scrubbed environment and macOS sandbox profile with network denied. | `tests/sandbox.test.ts` | Unit | PASS |
 
 ## Final verification
 
-- `pnpm verify`: PASS — lint, typecheck, 30 tests, coverage, build, MCP smoke.
-- `pnpm smoke:cursor`: PASS — selected `grok-4.5`, local sandbox enabled, disposable repository remained clean.
-- Clean-clone install simulation: PASS — pnpm publicly hoisted only the Cursor platform helper so SDK sandbox discovery works across clone paths.
-- Direct main-agent registration: PASS — live `~/.codex/config.toml` contains the managed MCP block with exactly four tools, and the obsolete managed custom-agent file was removed.
-- Fresh Codex process direct-tool smoke: PASS — the main agent called `cursor_bridge.cursor_get_task` itself; the deliberately invalid non-UUID job ID reached Bridge schema validation and was rejected as expected.
-- Coverage: statements 95.48%, branches 85.85%, functions 100%, lines 99.08% for the core policy modules.
-- `codex --strict-config doctor` against a temporary `CODEX_HOME`: config parse PASS; auth intentionally absent in the temporary home.
-- Repo-local marketplace and `cursor-bridge@coding-agent` install in a temporary `CODEX_HOME`: PASS.
+- `pnpm verify`: PASS — lint, typecheck, 46 tests, coverage, build, MCP smoke.
+- Coverage: statements 88.86%, branches 83.79%, functions 98.66%, lines 93.53% for the core policy modules.
+- Built supervisor runtime smoke: PASS — schema v3 DB initialized with mode `0600`, zero-job stats read back, and SIGINT shut down cleanly.
+- Real macOS verifier sandbox smoke: PASS — an allowlisted worktree write succeeded with canonical/symlink path handling while network and Keychain service access remained denied by policy.
+- `pnpm smoke:cursor`: NOT RUN — this Mac has no `codex-cursor-bridge/cursor-api-key` Keychain item; bootstrap/authentication remains an explicit owner action.
 - Plugin validator and skill quick validator: PASS.
-- `codex --strict-config doctor`: configuration and MCP inventory PASS; the non-interactive `TERM=dumb` diagnostic remains unrelated.
+- `pnpm audit`: PASS — `fast-uri` and `@hono/node-server` transitive dependencies are pinned to patched versions; no known vulnerabilities remain.
 
 ## Known gaps
 
-- The repository has no remote, so its own push/draft-PR smoke and draft PR creation remain unavailable until a remote is configured.
-- v1 credential installation targets macOS Keychain; Linux and Windows backends are intentionally out of scope.
+- A live Cursor account smoke still requires the owner to run `pnpm bootstrap` and configure the Keychain item.
+- Credential installation and the launchd supervisor intentionally target personal macOS use; Linux and Windows are out of scope.

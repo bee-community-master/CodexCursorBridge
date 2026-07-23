@@ -6,6 +6,7 @@ import { createInterface } from "node:readline/promises";
 import { emptyMachineConfig, loadMachineConfig, runtimePaths, saveMachineConfig } from "./config.js";
 import { runFile } from "./git.js";
 import { deleteCursorApiKey, storeCursorApiKey } from "./keychain.js";
+import { installSupervisor, uninstallSupervisor } from "./launchd.js";
 import { removeManagedRegistrationBlocks, upsertManagedMcpBlock } from "./managed-config.js";
 
 const agentMarker = "# Managed by codex-cursor-bridge bootstrap";
@@ -114,10 +115,12 @@ export async function bootstrap(projectRoot: string): Promise<void> {
   const codexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
   await installCodexRegistration(projectRoot, codexHome);
   await installPlugin(projectRoot);
-  process.stdout.write(`Installed Cursor Bridge MCP for the main Codex agent with Cursor model ${cursorModelId}.\nRestart Codex and open a new task.\n`);
+  await installSupervisor(projectRoot, paths.home);
+  process.stdout.write(`Installed Cursor Bridge MCP and launchd supervisor with Cursor model ${cursorModelId}.\nRestart Codex and open a new task.\n`);
 }
 
 export async function uninstall(projectRoot: string, deleteKey: boolean): Promise<void> {
+  await uninstallSupervisor();
   const codexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
   const configFile = path.join(codexHome, "config.toml");
   const agentFile = path.join(codexHome, "agents", "cursor.toml");
