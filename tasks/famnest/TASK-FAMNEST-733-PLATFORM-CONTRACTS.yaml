@@ -1,0 +1,118 @@
+id: TASK-FAMNEST-733-PLATFORM-CONTRACTS
+repository: famnest
+title: Add child participation profile contracts for Web Android and iOS
+spec_version: 2
+goal: "Add the small, platform-local data contract and shared fixture portion of issue #733 so Web,
+  Android, and iOS agree on the four participation axes, safe default, review state, and stage
+  recommendations before backend endpoint wiring."
+context_files:
+  - AGENTS.md
+  - docs/operations/build-contract.md
+  - docs/engineering/v15-common-contracts.md
+  - apps/web/src/lib/famnest/famnestWebAdapters.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestMemberApiDtos.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/CandidateApprovalActivityApiDtosTest.kt
+  - apps/ios/Sources/FamNestIOSCore/API/APIChildPinModels.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/APIModelDefaultDecodingTests.swift
+allowed_paths:
+  - packages/shared-types/fixtures/child-participation-profile-v1.json
+  - apps/web/src/lib/famnest/features/childParticipationContract.ts
+  - apps/web/src/lib/famnest/features/childParticipationContract.test.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestChildParticipationApiDtos.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/FamNestChildParticipationApiDtosTest.kt
+  - apps/ios/Sources/FamNestIOSCore/API/APIChildParticipationModels.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/ChildParticipationContractTests.swift
+forbidden_paths:
+  - .env
+  - supabase/**
+  - services/**
+  - packages/famnest-domain/**
+  - apps/web/src/lib/api/generated/**
+  - apps/android/presentation/**
+  - apps/ios/Sources/FamNestIOSApp/**
+non_goals:
+  - Do not add API endpoints, transports, repositories, database schema, migrations, UI,
+    authorization, ACL, session capability, proposal lifecycle, backfill, or offline write behavior.
+  - Do not hand-edit generated OpenAPI or generated Web client files.
+  - Do not infer participation stage from age, time, completion, device identity, or permissions.
+acceptance_criteria:
+  - The canonical enum values are exactly reading_mode visual_voice short_text full_text,
+    device_mode parent_device shared_device personal_device, help_mode together guided result_only,
+    sharing_control parent_managed joint child_managed, participation_stage unspecified preschool
+    grade_1_2 grade_3_4, and review_status needs_review pending_confirmation confirmed.
+  - "The shared fixture records those exact values, the safe missing-row default unspecified plus
+    visual_voice parent_device together parent_managed and needs_review, and the three
+    non-unspecified recommendation presets from issue #733."
+  - Web, Android, and iOS expose typed platform-local DTO/value contracts for child_member_id,
+    participation_stage, the four modes, review_status, non-negative revision, and optional
+    confirmed_at without network or UI behavior.
+  - Each platform has a pure safe-default constructor or constant and a pure stage recommendation
+    lookup; unspecified recommends the safe default and no lookup mutates or auto-applies an
+    effective profile.
+  - Tests on all three platforms prove that the Cartesian product of the four independent mode enums
+    has exactly 81 allowed combinations.
+  - Tests on all three platforms prove the safe default and all stage recommendations match the
+    shared fixture and unknown enum values fail decoding or parsing rather than widening behavior.
+  - No profile field is interpreted as role, PIN, member permission, resource ACL, sensitivity,
+    visible_to_child, or source/evidence permission.
+implementation_constraints:
+  - Follow existing naming, serialization, fixture-loading, and test conventions in each platform.
+  - Keep the contract data-only and deterministic with no clocks, random IDs, storage, network,
+    analytics, or device APIs.
+  - Use exhaustive enum representations and do not add catch-all unknown enum cases.
+  - Do not add runtime dependencies or edit build configuration.
+  - Keep wire field names aligned to snake_case JSON while following each platform's existing
+    Codable or serialization conventions.
+verification:
+  commands:
+    - command: pnpm
+      args:
+        - --filter
+        - "@famnest/web"
+        - test:unit
+      timeout_seconds: 900
+    - command: pnpm
+      args:
+        - run
+        - verify:android:fast
+      timeout_seconds: 1200
+    - command: swift
+      args:
+        - test
+        - --package-path
+        - apps/ios
+        - --filter
+        - ChildParticipationContractTests
+      timeout_seconds: 1200
+  profile_hash: sha256:79a7e06a395660946a2891c86389cbaffc8404c34a0c526193527cbc30f774ac
+required_new_tests:
+  - Add Web tests for exact enums, safe default, recommendations, unknown parsing, and all 81
+    combinations.
+  - Add Android tests for exact serialized enums, safe default, recommendations, unknown decoding,
+    non-negative revision, and all 81 combinations.
+  - Add iOS tests for exact Codable enums, safe default, recommendations, unknown decoding,
+    non-negative revision, and all 81 combinations.
+limits:
+  max_changed_files: 7
+  max_diff_lines: 700
+  allow_test_deletion: false
+  max_repair_attempts: 1
+stop_conditions:
+  - A backend or generated contract change is required to make the platform-local contracts compile.
+  - Existing architecture guards require moving the contract outside the approved paths.
+  - Any permission, ACL, session, persistence, API, or UI behavior would need to be invented.
+  - Verification would require production credentials, a device, an emulator, or a live service.
+pull_request:
+  mode: new_draft
+status: approved
+spec_hash: sha256:a58ef1e08d29a12a62feab2a60d350414e13260cc7228963be5a5a1c9fd9b658
+policy_version: 3
+target:
+  origin: HearingOffice/elevife-famnest
+  base_ref: main
+  destination_ref: main
+  base_sha: fae4aee1ed7802e4e617e8d06993ebed3d6f3f27
+  context_digest: sha256:114f409c2886efdde3f40446874f40ca079cb3cf8c36be0aca0c9f9ecef31e5b
+approval:
+  approved_at: 2026-07-30T16:06:55.387Z
+  approved_by: local-user
