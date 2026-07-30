@@ -1,0 +1,110 @@
+id: TASK-FAMNEST-728-PLATFORM-CONTRACTS
+repository: famnest
+title: Add operational memory contract models for Web Android and iOS
+spec_version: 1
+goal: Add small platform-local data contracts and shared-fixture parsing tests for the already
+  implemented operational-memory OpenAPI contract in issue
+context_files:
+  - AGENTS.md
+  - docs/operations/build-contract.md
+  - packages/shared-types/fixtures/operational-memory-contract-v1.json
+  - packages/shared-types/openapi/famnest-api.json
+  - apps/web/src/lib/famnest/features/childParticipationContract.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestChildParticipationApiDtos.kt
+  - apps/ios/Sources/FamNestIOSCore/API/APIChildParticipationModels.swift
+allowed_paths:
+  - apps/web/src/lib/famnest/features/operationalMemoryContract.ts
+  - apps/web/src/lib/famnest/features/operationalMemoryContract.test.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOperationalMemoryApiDtos.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/FamNestOperationalMemoryApiDtosTest.kt
+  - apps/ios/Sources/FamNestIOSCore/API/APIOperationalMemoryModels.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/APIOperationalMemoryContractTests.swift
+forbidden_paths:
+  - .env
+  - services/**
+  - supabase/**
+  - packages/shared-types/**
+  - packages/famnest-domain/**
+  - apps/web/src/lib/api/generated/**
+  - apps/android/presentation/**
+  - apps/ios/Sources/FamNestIOSApp/**
+non_goals:
+  - Do not add API endpoints, transports, repositories, persistence, migrations, UI, authorization,
+    business lifecycle decisions, or network behavior.
+  - Do not change the shared fixture, OpenAPI, generated Web client, backend, or database contract.
+  - Do not expose member-preference raw payload when the wire projection payload is null.
+acceptance_criteria:
+  - Web, Android, and iOS expose exhaustive typed values for the four kinds, one domain, all
+    thirteen statuses, three action IDs, typed condition/result variants, strict payload variants,
+    and role-aware projection payload nullability represented by the shared fixture.
+  - Each platform parses the family fact, owner preference, and non-owner redacted preference
+    projections from packages/shared-types/fixtures/operational-memory-contract-v1.json.
+  - Each platform parses the family agreement and automation policy create payloads and preserves
+    snake_case wire names without catch-all unknown enum cases.
+  - Tests prove unknown kind, status, action, payload discriminator, or domain fails rather than
+    widening the contract, and prove the non-owner preference projection keeps payload absent while
+    retaining resolved_summary.
+  - Platform-local route helpers or constants, if added, match the fixture and do not perform I/O.
+implementation_constraints:
+  - Follow existing platform naming, JSON serialization, Codable, fixture-loading, and test
+    conventions.
+  - Keep all code data-only, deterministic, and free of clocks, random IDs, storage, analytics,
+    network, device, or UI APIs.
+  - Use exhaustive enum representations with no unknown, other, raw-value fallback, or silent
+    default.
+  - Do not add runtime dependencies or edit build configuration.
+  - Keep wire fields snake_case while following existing platform serialization conventions.
+verification:
+  commands:
+    - command: pnpm
+      args:
+        - --filter
+        - "@famnest/web"
+        - test:unit
+      timeout_seconds: 900
+    - command: pnpm
+      args:
+        - run
+        - test:android:unit:data
+      timeout_seconds: 1200
+    - command: swift
+      args:
+        - test
+        - --package-path
+        - apps/ios
+        - --filter
+        - APIOperationalMemoryContractTests
+      timeout_seconds: 1200
+  profile_hash: sha256:bb5a53c3c4f5988b192b24abe03348cb6f035760c845f2fda82ab898b59ad896
+required_new_tests:
+  - Add Web tests for exact enums, fixture parsing, redacted preference payload, strict unknown
+    rejection, agreement create, and automation policy create.
+  - Add Android tests for exact serialized enums, fixture decoding, redacted preference payload,
+    strict unknown rejection, agreement create, and automation policy create.
+  - Add iOS tests for exact Codable enums, fixture decoding, redacted preference payload, strict
+    unknown rejection, agreement create, and automation policy create.
+limits:
+  max_changed_files: 6
+  max_diff_lines: 1200
+  allow_test_deletion: false
+  max_repair_attempts: 1
+stop_conditions:
+  - A backend, generated client, shared fixture, build configuration, dependency, transport,
+    persistence, authorization, or UI change is required.
+  - Existing architecture guards require moving the data contract outside the approved paths.
+  - Verification would require production credentials, a device, an emulator, or a live service.
+pull_request:
+  mode: existing_pr
+  number: 773
+status: approved
+spec_hash: sha256:126758b0667c6bfcddfe8cda922a4f98c0afd287c3dc3076ad916f7068c70e07
+policy_version: 3
+target:
+  origin: HearingOffice/elevife-famnest
+  base_ref: codex/v15-728-operational-memories
+  destination_ref: main
+  base_sha: 024606de3843a039bb23704a52ea88ff5b5afdc1
+  context_digest: sha256:5a3a9cbbb12ecdf05140f27b4f4e0bb3ddd89322790ac564a14eca3318acd953
+approval:
+  approved_at: 2026-07-30T19:54:23.663Z
+  approved_by: local-user
