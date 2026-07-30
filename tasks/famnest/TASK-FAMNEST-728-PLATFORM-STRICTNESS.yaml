@@ -1,0 +1,109 @@
+id: TASK-FAMNEST-728-PLATFORM-STRICTNESS
+repository: famnest
+title: Align operational memory platform validators with strict backend contract
+spec_version: 1
+goal: Strengthen the existing Web Android and iOS operational-memory data contracts so they reject
+  the same invalid payload shapes as the backend and decode the mutation replay marker.
+context_files:
+  - AGENTS.md
+  - docs/operations/build-contract.md
+  - docs/engineering/v15-common-contracts.md
+  - packages/shared-types/fixtures/operational-memory-contract-v1.json
+  - packages/shared-types/openapi/famnest-api.json
+  - apps/web/src/lib/famnest/features/operationalMemoryContract.ts
+  - apps/web/src/lib/famnest/features/operationalMemoryContract.test.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOperationalMemoryApiDtos.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/FamNestOperationalMemoryApiDtosTest.kt
+  - apps/ios/Sources/FamNestIOSCore/API/APIOperationalMemoryModels.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/APIOperationalMemoryContractTests.swift
+allowed_paths:
+  - apps/web/src/lib/famnest/features/operationalMemoryContract.ts
+  - apps/web/src/lib/famnest/features/operationalMemoryContract.test.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOperationalMemoryApiDtos.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/FamNestOperationalMemoryApiDtosTest.kt
+  - apps/ios/Sources/FamNestIOSCore/API/APIOperationalMemoryModels.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/APIOperationalMemoryContractTests.swift
+forbidden_paths:
+  - .env
+  - services/**
+  - supabase/**
+  - packages/shared-types/**
+  - packages/famnest-domain/**
+  - apps/web/src/lib/api/generated/**
+  - apps/android/presentation/**
+  - apps/ios/Sources/FamNestIOSApp/**
+non_goals:
+  - Do not change API endpoints, OpenAPI, shared fixtures, backend, database, persistence,
+    transport, authorization, lifecycle behavior, UI, or build configuration.
+  - Do not introduce a generic transition route or perform network I/O.
+acceptance_criteria:
+  - Web Android and iOS decode the fixture mutation_response including idempotent_replay without
+    weakening the existing exhaustive enum and discriminated payload contracts.
+  - Each platform rejects every payload in invalid_rule_payloads.
+  - Rule payload validators reject unknown top-level and nested keys, equals with more than one
+    value, duplicate condition values, duplicate affected member IDs, empty or over-bounded lists
+    and strings, and action/result field mismatches.
+  - Assignment actions require an assignee, forbid notification_mode, and reject a backup equal to
+    the assignee. Notification actions require notification_mode and forbid assignee fields.
+  - Automation policy validation keeps exact keys, nonnegative agreement revision, allowed action,
+    bounded unique affected members, and required bounded strings.
+  - Existing happy-path fixture projections and create requests continue to parse, including the
+    redacted non-owner preference payload.
+implementation_constraints:
+  - Follow existing platform naming, fixture loading, serialization, Codable, and test conventions.
+  - "Match backend limits: short labels 1-160, display reason 1-500, condition values 1-20, affected
+    members 1-100, merge IDs at most 100."
+  - Use explicit validation with no catch-all enum, unknown-key fallback, silent default, or runtime
+    dependency.
+  - Keep all code deterministic and data-only.
+verification:
+  commands:
+    - command: pnpm
+      args:
+        - --filter
+        - "@famnest/web"
+        - test:unit
+      timeout_seconds: 900
+    - command: pnpm
+      args:
+        - run
+        - test:android:unit:data
+      timeout_seconds: 1200
+    - command: swift
+      args:
+        - test
+        - --package-path
+        - apps/ios
+        - --filter
+        - APIOperationalMemoryContractTests
+      timeout_seconds: 1200
+  profile_hash: sha256:bb5a53c3c4f5988b192b24abe03348cb6f035760c845f2fda82ab898b59ad896
+required_new_tests:
+  - Add Web regression tests for mutation_response and every invalid_rule_payloads case.
+  - Add Android regression tests for mutation_response and every invalid_rule_payloads case.
+  - Add iOS regression tests for mutation_response and every invalid_rule_payloads case.
+limits:
+  max_changed_files: 6
+  max_diff_lines: 1800
+  allow_test_deletion: false
+  max_repair_attempts: 1
+stop_conditions:
+  - A backend, OpenAPI, generated client, shared fixture, build configuration, dependency,
+    transport, persistence, authorization, or UI change is required.
+  - Existing architecture guards require moving the contract outside the approved paths.
+  - Verification requires credentials, a device, an emulator, or a live service.
+pull_request:
+  mode: existing_pr
+  number: 773
+status: approved
+spec_hash: sha256:79edd405b87865786f405fddf158e7bf3ba4e41cb443c7671cdd053e42f3349e
+policy_version: 3
+target:
+  origin: HearingOffice/elevife-famnest
+  base_ref: codex/v15-728-operational-memories
+  destination_ref: main
+  base_sha: 7e46eabf4cecc5775df46451faeea678c54083b5
+  context_digest: sha256:1bcf95124ca93a3b6e28a22d96dbb98687fe2794c0f2db80687626ee4b5033d4
+approval:
+  approved_at: 2026-07-30T20:40:18.003Z
+  approved_by: local-user
