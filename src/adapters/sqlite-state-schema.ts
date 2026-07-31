@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-export const STATE_SCHEMA_VERSION = 3;
+export const STATE_SCHEMA_VERSION = 4;
 
 export function migrateStateDatabase(database: DatabaseSync): void {
   const versionRow = database.prepare("PRAGMA user_version").get() as Record<string, unknown>;
@@ -79,6 +79,16 @@ export function migrateStateDatabase(database: DatabaseSync): void {
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS effects_job_idx ON effects(job_id, kind);
+      CREATE TABLE IF NOT EXISTS cursor_run_event_consumptions (
+        run_id TEXT NOT NULL,
+        event_key TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        consumed_at TEXT NOT NULL,
+        PRIMARY KEY(run_id, event_key)
+      );
+      CREATE INDEX IF NOT EXISTS cursor_run_event_consumptions_job_idx
+        ON cursor_run_event_consumptions(job_id, attempt_id);
       UPDATE jobs
       SET status = 'FAILED',
           error_message = COALESCE(

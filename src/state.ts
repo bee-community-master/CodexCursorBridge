@@ -358,6 +358,22 @@ export class JobStore implements WorkerStatePort {
     return this.transitionAttempt(attemptId, workerToken, [attempt.status], attempt.status, fields);
   }
 
+  consumeRunEvent(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    runId: string,
+    eventKey: string,
+  ): boolean {
+    return this.#ledger.consumeRunEvent(
+      jobId,
+      attemptId,
+      workerToken,
+      runId,
+      eventKey,
+    );
+  }
+
   beginRepairAttempt(
     jobId: string,
     previousAttemptId: string,

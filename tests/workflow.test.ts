@@ -326,6 +326,43 @@ describe("workflow orchestration", () => {
     expect(fake.publish).not.toHaveBeenCalled();
   });
 
+  it("terminates one reclaimed attempt as recovery-required and fences the stale worker", async () => {
+    const { store, claim } = await fixture();
+    const reclaimed = store.claimNext(
+      "replacement-worker",
+      60_000,
+      new Date(Date.now() + 120_000),
+    )!;
+    const fake = adapter([["src/demo.ts"]]);
+    vi.mocked(fake.runImplementer).mockResolvedValueOnce({
+      status: "blocked",
+      agentId: "agent",
+      runId: "detached-run",
+      summary: "Recovery required: detached run cannot be monitored safely.",
+      reason: "RECOVERY_REQUIRED: inspect the persisted run before retrying.",
+    });
+
+    await executeWorkflow(store, reclaimed, task, repository, fake);
+
+    expect(reclaimed.resumed).toBe(true);
+    expect(fake.runImplementer).toHaveBeenCalledOnce();
+    expect(fake.publish).not.toHaveBeenCalled();
+    expect(fake.writeReport).toHaveBeenCalledOnce();
+    expect(store.get(claim.job.id)).toMatchObject({
+      status: "BLOCKED",
+      errorMessage: "RECOVERY_REQUIRED: inspect the persisted run before retrying.",
+    });
+    expect(store.listEvents(claim.job.id).filter(
+      (event) => event.type === "ATTEMPT_TRANSITIONED"
+        && event.data.to === "BLOCKED",
+    )).toHaveLength(1);
+    expect(() => store.updateAttempt(
+      claim.attempt.id,
+      claim.attempt.workerToken,
+      { outcomeSummary: "stale worker overwrite" },
+    )).toThrow(/lease|state changed/i);
+  });
+
   it("keeps an ambiguous Cursor transport failure reclaimable instead of marking it FAILED", async () => {
     const { store, claim } = await fixture();
     const fake = adapter([["src/demo.ts"]]);

@@ -35,12 +35,18 @@ import {
   transportFailureSummary,
   transportRetryDelayMs,
 } from "./cursor-transport.js";
+import {
+  detachedRunOutcome,
+  recoveredRunMetadata,
+  supportsRunOperation,
+} from "./cursor-run-recovery.js";
+import { waitForOutcome } from "./cursor-run-wait.js";
 import type { PreparedWorktreeGuard } from "./prepared-worktree-guard.js";
 import type { WorkflowLogger } from "./workflow-logger.js";
 
 type CursorRunStatePort = Pick<
   PublicationStatePort,
-  "isCancellationRequested" | "updateAttempt"
+  "isCancellationRequested" | "updateAttempt" | "consumeRunEvent"
 >;
 
 interface LocalCursorRunOptions {
@@ -52,6 +58,7 @@ interface LocalCursorRunOptions {
 type RecoveredCursorRun =
   | { kind: "active"; run: Run }
   | { kind: "outcome"; outcome: ImplementerOutcome }
+  | { kind: "recovery-required"; outcome: ImplementerOutcome }
   | { kind: "new"; previousRunId?: string };
 
 const outcomeSchema = z.object({
@@ -59,10 +66,6 @@ const outcomeSchema = z.object({
   summary: z.string().min(1).max(8_000),
   reason: z.string().min(1).max(4_000).optional(),
 });
-
-function eventSummary(event: { type: string; name?: string; status?: string }): string {
-  return [event.type, event.name, event.status].filter(Boolean).join(" ");
-}
 
 function hasPersistedOutcome(
   attempt: Attempt,
@@ -84,18 +87,6 @@ function isForceSendMarker(error: unknown): boolean {
 
 function isRecoverableCursorRunError(error: unknown): boolean {
   return isTransientCursorTransportError(error) || isForceSendMarker(error);
-}
-
-function recoveredRunMetadata(
-  run: Run,
-): Pick<ImplementerOutcome, "inputTokens" | "outputTokens" | "requestId"> {
-  return {
-    ...(run.requestId ? { requestId: run.requestId } : {}),
-    ...(run.usage ? {
-      inputTokens: run.usage.inputTokens,
-      outputTokens: run.usage.outputTokens,
-    } : {}),
-  };
 }
 
 function restoredOutcome(
@@ -208,7 +199,9 @@ export class CursorImplementer {
       }),
     };
     const recovered = await this.#recoverDurableRun(prepared, attempt);
-    if (recovered.kind === "outcome") return recovered.outcome;
+    if (recovered.kind === "outcome" || recovered.kind === "recovery-required") {
+      return recovered.outcome;
+    }
 
     const agent = await this.#createOrResumeAgentWithRetry(
       prepared,
@@ -387,7 +380,15 @@ export class CursorImplementer {
       if (priorRun.status === "running" && hasPersistedOutcome(attempt)) {
         priorRun = await this.#stopPriorRun(runId, options);
       }
-      if (priorRun.status === "running") return { kind: "active", run: priorRun };
+      if (priorRun.status === "running") {
+        if (!supportsRunOperation(priorRun, "wait")) {
+          return {
+            kind: "recovery-required",
+            outcome: detachedRunOutcome(priorRun, attempt, recoveredAgentId),
+          };
+        }
+        return { kind: "active", run: priorRun };
+      }
       const outcome = restoredOutcome(priorRun, attempt, recoveredAgentId, runId);
       if (outcome) return { kind: "outcome", outcome };
 
@@ -395,6 +396,12 @@ export class CursorImplementer {
       // store confirms that no newer run is active for this agent.
       const active = await this.#findActiveRun(recoveredAgentId, options);
       if (active) {
+        if (!supportsRunOperation(active, "wait")) {
+          return {
+            kind: "recovery-required",
+            outcome: detachedRunOutcome(active, attempt, recoveredAgentId),
+          };
+        }
         await this.#bindRun(attempt, recoveredAgentId, active);
         return { kind: "active", run: active };
       }
@@ -403,6 +410,12 @@ export class CursorImplementer {
     if (!agentId) return { kind: "new" };
     const active = await this.#findActiveRun(agentId, options);
     if (active) {
+      if (!supportsRunOperation(active, "wait")) {
+        return {
+          kind: "recovery-required",
+          outcome: detachedRunOutcome(active, attempt, agentId),
+        };
+      }
       await this.#bindRun(attempt, agentId, active);
       return { kind: "active", run: active };
     }
@@ -523,7 +536,18 @@ export class CursorImplementer {
     let current = run;
     for (let retry = 1; retry <= CURSOR_TRANSPORT_MAX_ATTEMPTS; retry += 1) {
       try {
-        return await this.#waitForOutcome(current, agent, submitted);
+        if (current.status === "running" && !supportsRunOperation(current, "wait")) {
+          return detachedRunOutcome(current, attempt, agent.agentId);
+        }
+        return await waitForOutcome(
+          current,
+          agent,
+          attempt,
+          this.#jobId,
+          this.#store,
+          submitted,
+          this.#logSafely.bind(this),
+        );
       } catch (error) {
         if (!isRecoverableCursorRunError(error)) throw error;
         await this.#logTransportFailure("monitor", retry, error);
@@ -539,6 +563,7 @@ export class CursorImplementer {
           options,
         );
         if (rebound.kind === "outcome") return rebound.outcome;
+        if (rebound.kind === "recovery-required") return rebound.outcome;
         if (rebound.kind === "active") {
           current = rebound.run;
           if (retry < CURSOR_TRANSPORT_MAX_ATTEMPTS) {
@@ -563,11 +588,24 @@ export class CursorImplementer {
     options: LocalCursorRunOptions,
   ): Promise<RecoveredCursorRun> {
     const run = await this.#readPriorRun(runId, options);
-    if (run.status === "running") return { kind: "active", run };
+    if (run.status === "running") {
+      return supportsRunOperation(run, "wait")
+        ? { kind: "active", run }
+        : {
+          kind: "recovery-required",
+          outcome: detachedRunOutcome(run, attempt, agentId),
+        };
+    }
     const outcome = restoredOutcome(run, attempt, agentId, runId);
     if (outcome) return { kind: "outcome", outcome };
     const active = await this.#findActiveRun(agentId, options);
     if (active) {
+      if (!supportsRunOperation(active, "wait")) {
+        return {
+          kind: "recovery-required",
+          outcome: detachedRunOutcome(active, attempt, agentId),
+        };
+      }
       await this.#bindRun(attempt, agentId, active);
       return { kind: "active", run: active };
     }
@@ -633,62 +671,4 @@ export class CursorImplementer {
     return confirmed;
   }
 
-  async #waitForOutcome(
-    run: Run,
-    agent: SDKAgent,
-    submitted: () => z.infer<typeof outcomeSchema> | undefined,
-  ): Promise<ImplementerOutcome> {
-    let cancellationCheckActive = false;
-    const cancellationTimer = setInterval(() => {
-      if (cancellationCheckActive || !this.#store.isCancellationRequested(this.#jobId)) return;
-      cancellationCheckActive = true;
-      void run.cancel()
-        .catch((error: unknown) =>
-          this.#logSafely(`Cursor cancellation failed: ${safeErrorMessage(error)}`))
-        .finally(() => {
-          cancellationCheckActive = false;
-        });
-    }, 500);
-    cancellationTimer.unref();
-    try {
-      for await (const event of run.stream()) await this.#logSafely(eventSummary(event));
-      const result = await run.wait();
-      if (result.status === "cancelled" && this.#store.isCancellationRequested(this.#jobId)) {
-        return {
-          status: "blocked",
-          agentId: agent.agentId,
-          runId: run.id,
-          ...(result.requestId ? { requestId: result.requestId } : {}),
-          summary: "Cancelled by user request.",
-          reason: "Cancellation was requested by the bridge.",
-          ...(result.usage ? {
-            inputTokens: result.usage.inputTokens,
-            outputTokens: result.usage.outputTokens,
-          } : {}),
-        };
-      }
-      if (result.status !== "finished") {
-        throw new Error(result.error?.message ?? `Cursor run ended with ${result.status}`);
-      }
-      const structured = submitted() ?? {
-        status: "needs_input" as const,
-        summary: redactSensitiveText(result.result ?? "Cursor did not submit a structured outcome."),
-        reason: "Cursor completed without calling submit_bridge_outcome.",
-      };
-      return {
-        status: structured.status,
-        agentId: agent.agentId,
-        runId: run.id,
-        ...(result.requestId ? { requestId: result.requestId } : {}),
-        summary: redactSensitiveText(structured.summary),
-        ...(structured.reason ? { reason: redactSensitiveText(structured.reason) } : {}),
-        ...(result.usage ? {
-          inputTokens: result.usage.inputTokens,
-          outputTokens: result.usage.outputTokens,
-        } : {}),
-      };
-    } finally {
-      clearInterval(cancellationTimer);
-    }
-  }
 }

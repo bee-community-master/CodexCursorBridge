@@ -208,6 +208,13 @@ export interface PublicationStatePort extends JobStateReader {
   isCancellationRequested(jobId: string): boolean;
   update(id: string, fields: Partial<Job>): void;
   updateAttempt(attemptId: string, workerToken: string, fields: Partial<Attempt>): Attempt;
+  consumeRunEvent(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    runId: string,
+    eventKey: string,
+  ): boolean;
 }
 
 export type WorkerStatePort = WorkflowStatePort & PublicationStatePort;

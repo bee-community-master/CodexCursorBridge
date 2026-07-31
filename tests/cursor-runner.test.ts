@@ -45,12 +45,14 @@ const store = {
   completeEffect: vi.fn(),
   update: vi.fn(),
   updateAttempt: vi.fn(),
+  consumeRunEvent: vi.fn(() => true),
   isCancellationRequested: vi.fn(() => false),
 } as unknown as JobStore;
 
 beforeEach(() => {
   vi.mocked(store.get).mockReset().mockReturnValue(undefined);
   vi.mocked(store.updateAttempt).mockReset();
+  vi.mocked(store.consumeRunEvent).mockReset().mockReturnValue(true);
   vi.mocked(store.isCancellationRequested).mockReset().mockReturnValue(false);
   sdkMocks.create.mockReset().mockRejectedValue(new Error("Unexpected new Cursor agent"));
   sdkMocks.resume.mockReset().mockRejectedValue(new Error("Unexpected Cursor resume"));
@@ -72,6 +74,46 @@ beforeEach(() => {
 });
 
 describe("Cursor implementer adapter", () => {
+  it("fences a detached persisted run as recovery-required without executor or run mutation", async () => {
+    const detachedRun = {
+      id: "detached-run",
+      agentId: "agent",
+      status: "running" as const,
+      supports: vi.fn((operation: string) => operation !== "wait"),
+      unsupportedReason: vi.fn(() => "Cannot wait on a detached running run"),
+      wait: vi.fn(),
+      stream: vi.fn(),
+    };
+    sdkMocks.getRun.mockResolvedValue(detachedRun);
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+    const attempt = {
+      ...publishingAttempt(),
+      status: "IMPLEMENTING" as const,
+      cursorAgentId: "agent",
+      cursorRunId: detachedRun.id,
+    };
+
+    const outcome = await adapter.runImplementer({
+      worktree: "/worktree",
+      baseSha: "b".repeat(40),
+      pushBranch: "branch",
+      localBranch: "branch",
+    }, approvedTask({ mode: "new_draft" }), attempt);
+
+    expect(outcome).toMatchObject({
+      status: "blocked",
+      agentId: "agent",
+      runId: detachedRun.id,
+    });
+    expect(outcome.summary).toMatch(/recovery required/i);
+    expect(outcome.reason).toMatch(/RECOVERY_REQUIRED/);
+    expect(sdkMocks.create).not.toHaveBeenCalled();
+    expect(sdkMocks.resume).not.toHaveBeenCalled();
+    expect(sdkMocks.cancelRun).not.toHaveBeenCalled();
+    expect(detachedRun.wait).not.toHaveBeenCalled();
+    expect(detachedRun.stream).not.toHaveBeenCalled();
+  });
+
   it("does not start a duplicate run when a finished run lacks a persisted outcome", async () => {
     sdkMocks.getRun.mockResolvedValue({
       id: "run",
@@ -234,6 +276,64 @@ describe("Cursor implementer adapter", () => {
     });
     expect(send).not.toHaveBeenCalled();
     expect(sdkMocks.getRun).toHaveBeenCalledOnce();
+  });
+
+  it("deduplicates replayed run events while preserving events appended after reclaim", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "cursor-event-replay-"));
+    const logPath = path.join(directory, "job.log");
+    vi.mocked(store.get).mockReturnValue({ logPath } as Job);
+    const streamEvents = [
+      { type: "assistant", status: "running" },
+      { type: "tool_call", name: "shell", status: "completed" },
+    ];
+    const activeRun = {
+      id: "replay-run",
+      agentId: "agent",
+      status: "running" as const,
+      async *stream(): AsyncGenerator<{ type: string; name?: string; status?: string }, void> {
+        for (const event of streamEvents) yield event;
+      },
+      wait: vi.fn(async () => ({
+        id: "replay-run",
+        agentId: "agent",
+        status: "finished" as const,
+        result: "done",
+      })),
+    };
+    const consumed = new Set<string>();
+    vi.mocked(store.consumeRunEvent).mockImplementation((_jobId, _attemptId, _workerToken, _runId, key) => {
+      if (consumed.has(key)) return false;
+      consumed.add(key);
+      return true;
+    });
+    sdkMocks.getRun.mockResolvedValue(activeRun);
+    sdkMocks.resume.mockResolvedValue({
+      agentId: "agent",
+      send: vi.fn(),
+      [Symbol.asyncDispose]: vi.fn(async () => undefined),
+    });
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+    const attempt = {
+      ...publishingAttempt(),
+      status: "IMPLEMENTING" as const,
+      cursorAgentId: "agent",
+      cursorRunId: "replay-run",
+    };
+    const prepared = {
+      worktree: "/worktree",
+      baseSha: "b".repeat(40),
+      pushBranch: "branch",
+      localBranch: "branch",
+    };
+
+    await adapter.runImplementer(prepared, approvedTask({ mode: "new_draft" }), attempt);
+    streamEvents.push({ type: "assistant", status: "running" });
+    await adapter.runImplementer(prepared, approvedTask({ mode: "new_draft" }), attempt);
+
+    const log = await readFile(logPath, "utf8");
+    expect(log.match(/assistant running/g)).toHaveLength(2);
+    expect(log.match(/tool_call shell completed/g)).toHaveLength(1);
+    expect(consumed.size).toBe(3);
   });
 
   it("rebinds a newer active run after a legacy force_send terminal marker", async () => {

@@ -84,6 +84,41 @@ export class SqliteStateLedger {
     `).run(jobId, attemptId ?? null, type, JSON.stringify(data), createdAt);
   }
 
+  consumeRunEvent(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    runId: string,
+    eventKey: string,
+  ): boolean {
+    const consumedAt = nowIso();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const active = this.#database.prepare(`
+        SELECT 1
+        FROM attempts a
+        JOIN jobs j ON j.id = a.job_id
+        WHERE a.id = ?
+          AND a.job_id = ?
+          AND a.worker_token = ?
+          AND j.current_attempt_id = a.id
+          AND a.status IN ('PREPARING', 'IMPLEMENTING', 'VERIFYING', 'REPAIRING', 'PUBLISHING')
+      `).get(attemptId, jobId, workerToken) as Record<string, unknown> | undefined;
+      if (!active) throw new Error(`Active attempt lease was lost: ${attemptId}`);
+      const result = this.#database.prepare(`
+        INSERT INTO cursor_run_event_consumptions (
+          run_id, event_key, job_id, attempt_id, consumed_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(run_id, event_key) DO NOTHING
+      `).run(runId, eventKey, jobId, attemptId, consumedAt);
+      this.#database.exec("COMMIT");
+      return result.changes === 1;
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   listEvents(jobId: string): JobEvent[] {
     return (this.#database.prepare(
       "SELECT * FROM job_events WHERE job_id = ? ORDER BY sequence",

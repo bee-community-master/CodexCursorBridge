@@ -331,6 +331,58 @@ describe("job state", () => {
     expect(store.listEvents(job.id).map((event) => event.type)).toContain("JOB_CLAIMED");
   });
 
+  it("durably deduplicates run event offsets across reclaim while fencing stale workers", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "cursor-state-events-"));
+    const databaseFile = path.join(dir, "jobs.sqlite");
+    const first = new JobStore(databaseFile);
+    stores.push(first);
+    const job = first.createOrGet({
+      repositoryAlias: "demo", taskId: "TASK-EVENTS", specVersion: 1, specHash: "sha256:events",
+      taskCommitSha: "a".repeat(40), taskBlobSha: "b".repeat(40),
+      targetOrigin: "owner/demo", targetBaseSha: "c".repeat(40),
+      policyVersion: 2, maxAttempts: 1,
+    });
+    const original = first.claimNext("worker-1", 1_000, new Date("2026-07-23T00:00:00.000Z"))!;
+    first.transitionAttempt(original.attempt.id, "worker-1", ["PREPARING"], "IMPLEMENTING");
+    expect(first.consumeRunEvent(job.id, original.attempt.id, "worker-1", "run-1", "offset:1"))
+      .toBe(true);
+    expect(first.consumeRunEvent(job.id, original.attempt.id, "worker-1", "run-1", "offset:1"))
+      .toBe(false);
+    const firstIndex = stores.indexOf(first);
+    stores.splice(firstIndex, 1);
+    first.close();
+
+    const second = new JobStore(databaseFile);
+    stores.push(second);
+    const reclaimed = second.claimNext(
+      "worker-2",
+      60_000,
+      new Date("2026-07-23T00:00:02.000Z"),
+    )!;
+    expect(reclaimed.resumed).toBe(true);
+    expect(() => second.consumeRunEvent(
+      job.id,
+      original.attempt.id,
+      "worker-1",
+      "run-1",
+      "offset:2",
+    )).toThrow(/lease/i);
+    expect(second.consumeRunEvent(
+      job.id,
+      reclaimed.attempt.id,
+      "worker-2",
+      "run-1",
+      "offset:1",
+    )).toBe(false);
+    expect(second.consumeRunEvent(
+      job.id,
+      reclaimed.attempt.id,
+      "worker-2",
+      "run-1",
+      "offset:2",
+    )).toBe(true);
+  });
+
   it("summarizes local delivery and first-attempt effectiveness", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "cursor-state-"));
     const store = new JobStore(path.join(dir, "jobs.sqlite"));

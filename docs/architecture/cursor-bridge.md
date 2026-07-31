@@ -58,19 +58,28 @@ MCP SDK, 프로세스 실행기 같은 outbound adapter를 import하지 않는�
 ## Cursor 실행 복구와 supervisor 경계
 
 - `src/adapters/cursor-runner.ts`는 Attempt에 기록된 `agentId`/`runId`를 먼저
-  읽는다. SDK local store에서 run이 `running`이면 기존 run을 그대로 재연결해
-  모니터링하며, `local.force`로 만료시키거나 follow-up을 만들지 않는다. Attempt에
+  읽는다. SDK local store에서 run이 `running`이고 `wait` capability를 가진
+  authoritative live handle이면 기존 run을 그대로 재연결해 모니터링한다. persisted
+  detached handle처럼 `supports("wait")`가 거짓인 run은 `RECOVERY_REQUIRED`와
+  redacted report를 가진 fenced `BLOCKED` 결과로 끝내며, resume/send/cancel/follow-up
+  또는 orphan retirement를 자동 수행하지 않는다. `local.force`로 만료시키거나
+  follow-up을 만들지 않는다. Attempt에
   run ID가 없더라도 agent의 active run 목록을 생성 시각과 ID로 결정적으로 정렬해
   하나를 선택하고, worker lease가 보유한 SQLite transition으로 identity를 원자적으로
   다시 결속한다. 과거 구현이 남긴 `force_send` terminal marker도 오류 확정으로
-  소비하지 않고 동일 agent의 최신 active run을 먼저 재조정한다.
+  소비하지 않고 동일 agent의 최신 active run을 먼저 재조정한다. Cursor stream
+  event는 run별 durable consumption key로 replay 시 중복 로그를 억제하면서 새
+  event는 보존한다.
 - SDK 전송 오류는 task의 `max_repair_attempts`와 별도의 3회 bounded retry를
   사용한다. 각 재시도 전에 local run 목록으로 이미 수락된 run을 확인하므로
   ambiguous send가 중복 run을 만들지 않는다. 연결이 끝내 불확실하면
   `CURSOR_TRANSPORT_UNCERTAIN` 진단을 남기고 Attempt를 active 상태로 보존해 다음
   supervisor가 lease 만료 후 재조정한다.
 - `src/supervisor.ts`는 claim, heartbeat, workflow 처리의 예외를 프로세스 경계에서
-  흡수하고 250ms부터 최대 30초까지 bounded exponential backoff를 적용한다. 예외가
+  흡수하고 250ms부터 최대 30초까지 bounded exponential backoff를 적용한다. active
+  claim heartbeat timer는 claim이 해결되기 전까지 process-referenced 상태로 유지해
+  detached/replay 작업이 code 0 자연 종료로 사라지지 않게 하며, completion/error/finally
+  경로에서 정리한다. 예외가
   난 Attempt를 임의로 FAILED로 만들지 않으며, `supervisor.log`와 Job log에 전송
   진단을 남긴 뒤 replacement supervisor가 durable lease를 reclaim할 수 있게 한다.
 

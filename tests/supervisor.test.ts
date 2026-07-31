@@ -1,4 +1,5 @@
 import { mkdtemp } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -26,6 +27,69 @@ function runtimePaths(root: string): RuntimePaths {
 }
 
 describe("durable supervisor recovery", () => {
+  it("keeps a pending claim alive long enough for a referenced heartbeat to advance the lease", async () => {
+    const script = `
+      import { mkdtemp } from "node:fs/promises";
+      import os from "node:os";
+      import path from "node:path";
+      const { JobStore } = await import("./src/state.ts");
+      const { runSupervisor } = await import("./src/supervisor.ts");
+      const root = await mkdtemp(path.join(os.tmpdir(), "cursor-supervisor-child-"));
+      const store = new JobStore(path.join(root, "jobs.sqlite"));
+      const job = store.createOrGet({
+        repositoryAlias: "demo", taskId: "TASK-CHILD", specVersion: 1, specHash: "sha256:child",
+        taskCommitSha: "a".repeat(40), taskBlobSha: "b".repeat(40),
+        targetOrigin: "owner/demo", targetBaseSha: "c".repeat(40),
+        policyVersion: 2, maxAttempts: 1,
+      });
+      const claim = store.claimNext("child-worker", 100);
+      const before = claim.attempt.heartbeatAt;
+      const paths = {
+        projectRoot: root, home: root, configFile: path.join(root, "config.json"),
+        databaseFile: path.join(root, "jobs.sqlite"), logsDir: path.join(root, "logs"),
+        reportsDir: path.join(root, "reports"), worktreesDir: path.join(root, "worktrees"),
+        tasksDir: path.join(root, "tasks"),
+      };
+      await runSupervisor(store, paths, {
+        workerToken: "child-worker",
+        claimLeaseMs: 100,
+        heartbeatIntervalMs: 20,
+        processClaim: async () => {
+          const timer = setTimeout(() => {
+            const current = store.getAttempt(claim.attempt.id);
+            process.stdout.write(JSON.stringify({ before, after: current?.heartbeatAt }) + "\\n", () => process.exit(0));
+          }, 140);
+          timer.unref();
+          await new Promise(() => undefined);
+        },
+      });
+    `;
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      cwd: process.cwd(),
+      stdio: ["ignore", "pipe", "pipe"],
+      env: process.env,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`child heartbeat proof timed out: ${stderr}`));
+      }, 3_000);
+      child.once("error", reject);
+      child.once("exit", (code, signal) => {
+        clearTimeout(timeout);
+        resolve({ code, signal });
+      });
+    });
+    expect(result, `child stderr: ${stderr}\nchild stdout: ${stdout}`).toMatchObject({ code: 0, signal: null });
+    const payload = JSON.parse(stdout.trim()) as { before: string; after?: string };
+    expect(payload.after).toBeDefined();
+    expect(payload.after).not.toBe(payload.before);
+  });
+
   it("uses a bounded exponential backoff for repeated runtime failures", () => {
     expect(supervisorBackoffMs(1)).toBe(250);
     expect(supervisorBackoffMs(2)).toBe(500);

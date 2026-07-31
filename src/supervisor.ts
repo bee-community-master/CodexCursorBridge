@@ -110,7 +110,6 @@ export async function runSupervisor(
         void logSupervisorFailure(paths, "heartbeat", error);
       }
     }, heartbeatMs);
-    heartbeat.unref();
     try {
       await processClaimImpl(store, claim, paths);
       failureStreak = 0;
