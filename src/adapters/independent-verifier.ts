@@ -28,34 +28,41 @@ function usesPnpm(command: string): command is PackageManagerBinary {
   return command === "pnpm" || command === "pnpx";
 }
 
+const packageManagerValueOptions = new Set([
+  "--changed-files-ignore-pattern",
+  "--child-concurrency",
+  "--dir",
+  "--filter",
+  "--filter-prod",
+  "--loglevel",
+  "--lockfile-dir",
+  "--network-concurrency",
+  "--package-import-method",
+  "--prefix",
+  "--reporter",
+  "--resume-from",
+  "--config",
+  "--store-dir",
+  "--test-pattern",
+  "--use-node-version",
+  "--virtual-store-dir",
+  "--workspace-concurrency",
+]);
+
+const packageManagerShortValueOptions = new Set(["C", "F"]);
+
+const dangerousPackageManagerCommands = new Set([
+  "exec",
+  "dlx",
+  "env",
+  "self-update",
+  "setup",
+  "shell",
+  "with",
+]);
+
 export function assertPackageManagerControlArgs(args: readonly string[]): void {
-  const valueOptions = new Set([
-    "--dir",
-    "--filter",
-    "--reporter",
-    "--aggregate-output",
-    "--child-concurrency",
-    "--config",
-    "--lockfile-dir",
-    "--network-concurrency",
-    "--package-import-method",
-    "--prefix",
-    "--resolution-only",
-    "--store-dir",
-    "--use-node-version",
-    "--virtual-store-dir",
-    "--workspace-concurrency",
-  ]);
   const settings = new Set<string>();
-  const dangerousCommands = new Set([
-    "exec",
-    "dlx",
-    "env",
-    "self-update",
-    "setup",
-    "shell",
-    "with",
-  ]);
   let command: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -83,9 +90,29 @@ export function assertPackageManagerControlArgs(args: readonly string[]): void {
     if (command !== undefined) continue;
     if (argument.startsWith("-")) {
       const optionName = argument.split("=", 1)[0] ?? "";
-      if (dangerousCommands.has(optionName.replace(/^-+/, ""))) command = optionName;
-      if (!argument.includes("=") && valueOptions.has(argument)) {
-        index += 1;
+      if (dangerousPackageManagerCommands.has(optionName.replace(/^-+/, ""))) {
+        command = optionName;
+        continue;
+      }
+      if (argument.startsWith("--")) {
+        if (!argument.includes("=") && packageManagerValueOptions.has(argument)) index += 1;
+        continue;
+      }
+      const shortOptions = argument.slice(1);
+      let shortValueOption = false;
+      for (let shortIndex = 0; shortIndex < shortOptions.length; shortIndex += 1) {
+        const shortOption = shortOptions[shortIndex];
+        if (shortOption === undefined || !packageManagerShortValueOptions.has(shortOption)) continue;
+        shortValueOption = true;
+        const attachedValue = shortOptions.slice(shortIndex + 1);
+        if (!attachedValue) index += 1;
+        break;
+      }
+      if (shortValueOption) {
+        continue;
+      }
+      if (dangerousPackageManagerCommands.has(shortOptions)) {
+        command = argument;
       }
       continue;
     }
@@ -101,7 +128,7 @@ export function assertPackageManagerControlArgs(args: readonly string[]): void {
   }
 
   const dangerousCommand = command?.replace(/^-+/, "");
-  if (dangerousCommand && dangerousCommands.has(dangerousCommand)) {
+  if (dangerousCommand && dangerousPackageManagerCommands.has(dangerousCommand)) {
     throw new Error(
       `Independent verifier rejects pnpm ${dangerousCommand}; nested package-manager execution is not attestable`,
     );
