@@ -248,11 +248,12 @@ export class CursorImplementer {
     const selected = chooseConfiguredGrok(
       await Cursor.models.list({ apiKey }),
       this.#config.cursorModelId,
+      this.#config.cursorModelParams,
     );
     const options = {
       apiKey,
       name: `codex-delegated:${task.id}`,
-      model: { id: selected.id },
+      model: selected,
       mode: "agent" as const,
       local: {
         cwd: prepared.worktree,

@@ -22,6 +22,11 @@ import {
 import { installSupervisor, uninstallSupervisor } from "./launchd.js";
 import { removeManagedRegistrationBlocks, upsertManagedMcpBlock } from "./managed-config.js";
 import { writeOwnerOnlyAtomic } from "./adapters/owner-only-atomic-file.js";
+import {
+  chooseConfiguredGrok,
+  modelParamsForEffort,
+  type CursorModelSelection,
+} from "./model.js";
 
 const agentMarker = "# Managed by codex-cursor-bridge bootstrap";
 const marketplaceName = "coding-agent";
@@ -81,7 +86,7 @@ async function readOptionalPlainFile(file: string): Promise<string | undefined> 
   }
 }
 
-async function chooseGrok(apiKey: string): Promise<string> {
+async function chooseGrok(apiKey: string): Promise<CursorModelSelection> {
   const grok = (await Cursor.models.list({ apiKey })).filter((model) =>
     `${model.id} ${model.displayName}`.toLowerCase().includes("grok"),
   );
@@ -93,7 +98,8 @@ async function chooseGrok(apiKey: string): Promise<string> {
   prompt.close();
   const selected = grok[Number(answer) - 1];
   if (!selected) throw new Error("Invalid Grok model selection");
-  return selected.id;
+  const params = modelParamsForEffort(selected, "high");
+  return chooseConfiguredGrok(grok, selected.id, params);
 }
 
 export async function installPlugin(projectRoot: string): Promise<void> {
@@ -153,14 +159,19 @@ export async function installCodexRegistration(projectRoot: string, codexHome: s
 
 export async function loadBootstrapConfig(
   configFile: string,
-  cursorModelId: string,
+  cursorModel: CursorModelSelection,
 ): Promise<ReturnType<typeof emptyMachineConfig>> {
   try {
     const existing = await loadMachineConfig(configFile);
-    return { ...existing, cursorModelId };
+    const { cursorModelParams: _oldParams, ...rest } = existing;
+    return {
+      ...rest,
+      cursorModelId: cursorModel.id,
+      ...(cursorModel.params ? { cursorModelParams: cursorModel.params } : {}),
+    };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    return emptyMachineConfig(cursorModelId);
+    return emptyMachineConfig(cursorModel.id, cursorModel.params);
   }
 }
 
@@ -170,17 +181,18 @@ export async function bootstrap(projectRoot: string): Promise<void> {
   process.stdout.write("Enter the Cursor API key in the macOS Keychain prompt.\n");
   await storeCursorApiKey();
   const apiKey = await readCursorApiKey();
-  const cursorModelId = await chooseGrok(apiKey);
+  const cursorModel = await chooseGrok(apiKey);
 
   const paths = runtimePaths(projectRoot);
-  const machineConfig = await loadBootstrapConfig(paths.configFile, cursorModelId);
+  const machineConfig = await loadBootstrapConfig(paths.configFile, cursorModel);
   await saveMachineConfig(paths.configFile, machineConfig);
 
   const codexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
   await installCodexRegistration(projectRoot, codexHome);
   await installPlugin(projectRoot);
   await installSupervisor(projectRoot, paths.home);
-  process.stdout.write(`Installed Cursor Bridge MCP and launchd supervisor with Cursor model ${cursorModelId}.\nRestart Codex and open a new task.\n`);
+  const params = cursorModel.params?.map(({ id, value }) => `${id}=${value}`).join(", ") ?? "default";
+  process.stdout.write(`Installed Cursor Bridge MCP and launchd supervisor with Cursor model ${cursorModel.id} (${params}).\nRestart Codex and open a new task.\n`);
 }
 
 export async function uninstall(projectRoot: string, deleteKey: boolean): Promise<void> {

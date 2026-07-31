@@ -4,6 +4,7 @@ import path from "node:path";
 import { z } from "zod";
 import { writeOwnerOnlyAtomic } from "./adapters/owner-only-atomic-file.js";
 import type {
+  CursorModelParameter,
   MachineConfig,
   RepositoryConfig,
   RuntimePaths,
@@ -32,9 +33,32 @@ const repositorySchema = z.object({
     .refine(hasNoControlCharacters, "default branch contains control characters"),
 });
 
+const cursorModelParameterSchema = z.object({
+  id: z.string().min(1)
+    .refine(hasNoControlCharacters, "Cursor model parameter id contains control characters"),
+  value: z.string().min(1)
+    .refine(hasNoControlCharacters, "Cursor model parameter value contains control characters"),
+});
+
+const cursorModelParamsSchema = z.array(cursorModelParameterSchema).max(16)
+  .superRefine((parameters, context) => {
+    const ids = new Set<string>();
+    parameters.forEach((parameter, index) => {
+      if (ids.has(parameter.id)) {
+        context.addIssue({
+          code: "custom",
+          path: [index, "id"],
+          message: `Duplicate Cursor model parameter id: ${parameter.id}`,
+        });
+      }
+      ids.add(parameter.id);
+    });
+  });
+
 const machineConfigSchema = z.object({
   cursorModelId: z.string().min(1)
     .refine(hasNoControlCharacters, "Cursor model id contains control characters"),
+  cursorModelParams: cursorModelParamsSchema.optional(),
   repositories: z.record(z.string().regex(/^[a-z0-9][a-z0-9-]*$/), repositorySchema),
 });
 
@@ -78,6 +102,13 @@ export function addRepository(config: MachineConfig, alias: string, repository: 
   });
 }
 
-export function emptyMachineConfig(cursorModelId: string): MachineConfig {
-  return machineConfigSchema.parse({ cursorModelId, repositories: {} });
+export function emptyMachineConfig(
+  cursorModelId: string,
+  cursorModelParams?: CursorModelParameter[],
+): MachineConfig {
+  return machineConfigSchema.parse({
+    cursorModelId,
+    ...(cursorModelParams ? { cursorModelParams } : {}),
+    repositories: {},
+  });
 }

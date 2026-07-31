@@ -19,11 +19,15 @@ try {
 
   const apiKey = await readCursorApiKey();
   const config = await loadMachineConfig(paths.configFile);
-  const model = chooseConfiguredGrok(await Cursor.models.list({ apiKey }), config.cursorModelId);
+  const model = chooseConfiguredGrok(
+    await Cursor.models.list({ apiKey }),
+    config.cursorModelId,
+    config.cursorModelParams,
+  );
   const agent = await Agent.create({
     apiKey,
     name: "codex-cursor-bridge-live-smoke",
-    model: { id: model.id },
+    model,
     mode: "agent",
     local: {
       cwd: repository,

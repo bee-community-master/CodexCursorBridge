@@ -4,8 +4,14 @@ export interface RepositoryConfig {
   defaultBranch: string;
 }
 
+export interface CursorModelParameter {
+  id: string;
+  value: string;
+}
+
 export interface MachineConfig {
   cursorModelId: string;
+  cursorModelParams?: CursorModelParameter[];
   repositories: Record<string, RepositoryConfig>;
 }
 
