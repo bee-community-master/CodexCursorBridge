@@ -34,11 +34,11 @@ export function eventKey(event: unknown, occurrence: number): string {
 
 export function supportsRunOperation(
   run: Run,
-  operation: "wait" | "stream",
+  operation: "wait" | "stream" | "cancel",
 ): boolean {
   const candidate = run as Run & {
-    supports?: (supportedOperation: "wait" | "stream") => boolean;
-    unsupportedReason?: (unsupportedOperation: "wait" | "stream") => string | undefined;
+    supports?: (supportedOperation: "wait" | "stream" | "cancel") => boolean;
+    unsupportedReason?: (unsupportedOperation: "wait" | "stream" | "cancel") => string | undefined;
   };
   if (typeof candidate.supports === "function") {
     return candidate.supports(operation);

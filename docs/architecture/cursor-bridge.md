@@ -68,8 +68,9 @@ MCP SDK, 프로세스 실행기 같은 outbound adapter를 import하지 않는�
   하나를 선택하고, worker lease가 보유한 SQLite transition으로 identity를 원자적으로
   다시 결속한다. 과거 구현이 남긴 `force_send` terminal marker도 오류 확정으로
   소비하지 않고 동일 agent의 최신 active run을 먼저 재조정한다. Cursor stream
-  event는 run별 durable consumption key로 replay 시 중복 로그를 억제하면서 새
-  event는 보존한다.
+  event는 run별 durable outbox에서 `PENDING`으로 먼저 보존한 뒤 로그에 기록하고
+  `LOGGED`로 전이한다. stable event marker를 사용하는 로그 writer와 reclaim drain은
+  write 성공 후 worker가 중단돼도 재전달하고 confirmed event를 중복 기록하지 않는다.
 - SDK 전송 오류는 task의 `max_repair_attempts`와 별도의 3회 bounded retry를
   사용한다. 각 재시도 전에 local run 목록으로 이미 수락된 run을 확인하므로
   ambiguous send가 중복 run을 만들지 않는다. 연결이 끝내 불확실하면

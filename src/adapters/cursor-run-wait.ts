@@ -3,6 +3,7 @@ import type { ImplementerOutcome, PublicationStatePort } from "../application/wo
 import type { Attempt } from "../domain/job.js";
 import { redactSensitiveText, safeErrorMessage } from "../application/redaction.js";
 import { eventKey, stableEventValue } from "./cursor-run-recovery.js";
+import { deliverRunEvent, drainPendingRunEvents } from "./cursor-run-event-outbox.js";
 
 type SubmittedOutcome = {
   status: "completed" | "blocked" | "needs_input";
@@ -12,7 +13,10 @@ type SubmittedOutcome = {
 
 type CursorRunWaitState = Pick<
   PublicationStatePort,
-  "isCancellationRequested" | "consumeRunEvent"
+  "isCancellationRequested"
+  | "beginRunEvent"
+  | "completeRunEvent"
+  | "listPendingRunEvents"
 >;
 
 function eventSummary(event: { type: string; name?: string; status?: string }): string {
@@ -27,6 +31,7 @@ export async function waitForOutcome(
   store: CursorRunWaitState,
   submitted: () => SubmittedOutcome | undefined,
   logSafely: (message: string) => Promise<void>,
+  logEvent: (eventKey: string, message: string) => Promise<void>,
 ): Promise<ImplementerOutcome> {
   let cancellationCheckActive = false;
   const cancellationTimer = setInterval(() => {
@@ -40,21 +45,22 @@ export async function waitForOutcome(
   }, 500);
   cancellationTimer.unref();
   try {
+    await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely);
     const occurrences = new Map<string, number>();
     for await (const event of run.stream()) {
       const signature = stableEventValue(event);
       const occurrence = occurrences.get(signature) ?? 0;
       occurrences.set(signature, occurrence + 1);
-      const consumed = typeof store.consumeRunEvent === "function"
-        ? store.consumeRunEvent(
-          jobId,
-          attempt.id,
-          attempt.workerToken,
-          run.id,
-          eventKey(event, occurrence),
-        )
-        : true;
-      if (consumed) await logSafely(eventSummary(event));
+      await deliverRunEvent(
+        jobId,
+        attempt,
+        store,
+        run.id,
+        eventKey(event, occurrence),
+        redactSensitiveText(eventSummary(event)),
+        logEvent,
+        logSafely,
+      );
     }
     const result = await run.wait();
     if (result.status === "cancelled" && store.isCancellationRequested(jobId)) {

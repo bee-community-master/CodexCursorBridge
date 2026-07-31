@@ -45,14 +45,18 @@ const store = {
   completeEffect: vi.fn(),
   update: vi.fn(),
   updateAttempt: vi.fn(),
-  consumeRunEvent: vi.fn(() => true),
+  beginRunEvent: vi.fn(() => "NEW"),
+  completeRunEvent: vi.fn(),
+  listPendingRunEvents: vi.fn(() => []),
   isCancellationRequested: vi.fn(() => false),
 } as unknown as JobStore;
 
 beforeEach(() => {
   vi.mocked(store.get).mockReset().mockReturnValue(undefined);
   vi.mocked(store.updateAttempt).mockReset();
-  vi.mocked(store.consumeRunEvent).mockReset().mockReturnValue(true);
+  vi.mocked(store.beginRunEvent).mockReset().mockReturnValue("NEW");
+  vi.mocked(store.completeRunEvent).mockReset();
+  vi.mocked(store.listPendingRunEvents).mockReset().mockReturnValue([]);
   vi.mocked(store.isCancellationRequested).mockReset().mockReturnValue(false);
   sdkMocks.create.mockReset().mockRejectedValue(new Error("Unexpected new Cursor agent"));
   sdkMocks.resume.mockReset().mockRejectedValue(new Error("Unexpected Cursor resume"));
@@ -114,6 +118,45 @@ describe("Cursor implementer adapter", () => {
     expect(detachedRun.stream).not.toHaveBeenCalled();
   });
 
+  it("does not cancel a detached run even when its structured outcome was persisted", async () => {
+    const detachedRun = {
+      id: "detached-outcome-run",
+      agentId: "agent",
+      status: "running" as const,
+      supports: vi.fn((operation: string) => operation !== "wait"),
+      unsupportedReason: vi.fn(() => "Cannot wait on a detached running run"),
+      wait: vi.fn(),
+      stream: vi.fn(),
+    };
+    sdkMocks.getRun.mockResolvedValue(detachedRun);
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+    const attempt = {
+      ...publishingAttempt(),
+      status: "IMPLEMENTING" as const,
+      cursorAgentId: "agent",
+      cursorRunId: detachedRun.id,
+      outcome: "completed" as const,
+      outcomeSummary: "Persisted structured outcome",
+    };
+
+    const outcome = await adapter.runImplementer({
+      worktree: "/worktree",
+      baseSha: "b".repeat(40),
+      pushBranch: "branch",
+      localBranch: "branch",
+    }, approvedTask({ mode: "new_draft" }), attempt);
+
+    expect(outcome.status).toBe("blocked");
+    expect(outcome.reason).toMatch(/RECOVERY_REQUIRED/);
+    expect(sdkMocks.getRun).toHaveBeenCalledOnce();
+    expect(sdkMocks.cancelRun).not.toHaveBeenCalled();
+    expect(sdkMocks.resume).not.toHaveBeenCalled();
+    expect(sdkMocks.create).not.toHaveBeenCalled();
+    expect(sdkMocks.listRuns).not.toHaveBeenCalled();
+    expect(detachedRun.wait).not.toHaveBeenCalled();
+    expect(detachedRun.stream).not.toHaveBeenCalled();
+  });
+
   it("does not start a duplicate run when a finished run lacks a persisted outcome", async () => {
     sdkMocks.getRun.mockResolvedValue({
       id: "run",
@@ -157,6 +200,7 @@ describe("Cursor implementer adapter", () => {
         id: "run",
         agentId: "agent",
         status: "running",
+        supports: () => true,
       })
       .mockResolvedValueOnce({
         id: "run",
@@ -203,6 +247,7 @@ describe("Cursor implementer adapter", () => {
         id: "run",
         agentId: "agent",
         status: "running",
+        supports: () => true,
       })
       .mockResolvedValueOnce({
         id: "run",
@@ -301,10 +346,10 @@ describe("Cursor implementer adapter", () => {
       })),
     };
     const consumed = new Set<string>();
-    vi.mocked(store.consumeRunEvent).mockImplementation((_jobId, _attemptId, _workerToken, _runId, key) => {
-      if (consumed.has(key)) return false;
+    vi.mocked(store.beginRunEvent).mockImplementation((_jobId, _attemptId, _workerToken, _runId, key) => {
+      if (consumed.has(key)) return "LOGGED";
       consumed.add(key);
-      return true;
+      return "NEW";
     });
     sdkMocks.getRun.mockResolvedValue(activeRun);
     sdkMocks.resume.mockResolvedValue({
@@ -738,6 +783,7 @@ describe("Cursor implementer adapter", () => {
       id: "run",
       agentId: "agent",
       status: "running",
+      supports: () => true,
     });
     const adapter = new RealWorkflowAdapter(paths, config, store, "job");
 
@@ -748,6 +794,26 @@ describe("Cursor implementer adapter", () => {
       cursorRunId: "run",
       worktree: "/worktree",
     })).rejects.toThrow(/still active/i);
+  });
+
+  it("does not mutate a detached run when cancellation cannot be confirmed", async () => {
+    sdkMocks.getRun.mockResolvedValue({
+      id: "detached-cancel-run",
+      agentId: "agent",
+      status: "running",
+      supports: (operation: string) => operation !== "wait" && operation !== "cancel",
+      unsupportedReason: () => "Cannot operate on detached run",
+    });
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+
+    await expect(adapter.cancel({
+      ...publishingAttempt(),
+      status: "IMPLEMENTING",
+      cursorAgentId: "agent",
+      cursorRunId: "detached-cancel-run",
+      worktree: "/worktree",
+    })).rejects.toThrow(/RECOVERY_REQUIRED.*detached/i);
+    expect(sdkMocks.cancelRun).not.toHaveBeenCalled();
   });
 
   it("treats an already terminal persisted run as stopped without cancelling it again", async () => {

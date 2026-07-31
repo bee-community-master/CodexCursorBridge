@@ -40,40 +40,39 @@ import {
   recoveredRunMetadata,
   supportsRunOperation,
 } from "./cursor-run-recovery.js";
+import { drainPendingRunEvents } from "./cursor-run-event-outbox.js";
 import { waitForOutcome } from "./cursor-run-wait.js";
 import type { PreparedWorktreeGuard } from "./prepared-worktree-guard.js";
 import type { WorkflowLogger } from "./workflow-logger.js";
-
 type CursorRunStatePort = Pick<
   PublicationStatePort,
-  "isCancellationRequested" | "updateAttempt" | "consumeRunEvent"
+  "isCancellationRequested"
+  | "updateAttempt"
+  | "beginRunEvent"
+  | "completeRunEvent"
+  | "listPendingRunEvents"
 >;
-
 interface LocalCursorRunOptions {
   runtime: "local";
   cwd: string;
   store: JsonlLocalAgentStore;
 }
-
 type RecoveredCursorRun =
   | { kind: "active"; run: Run }
   | { kind: "outcome"; outcome: ImplementerOutcome }
   | { kind: "recovery-required"; outcome: ImplementerOutcome }
   | { kind: "new"; previousRunId?: string };
-
 const outcomeSchema = z.object({
   status: z.enum(["completed", "blocked", "needs_input"]),
   summary: z.string().min(1).max(8_000),
   reason: z.string().min(1).max(4_000).optional(),
 });
-
 function hasPersistedOutcome(
   attempt: Attempt,
 ): attempt is Attempt & Required<Pick<Attempt, "outcome" | "outcomeSummary">> {
   return attempt.outcome !== undefined
     && attempt.outcomeSummary !== undefined;
 }
-
 function isForceSendMarker(error: unknown): boolean {
   const candidate = error as { message?: unknown; code?: unknown } | undefined;
   const values = [
@@ -198,6 +197,13 @@ export class CursorImplementer {
         });
       }),
     };
+    await drainPendingRunEvents(
+      this.#jobId,
+      attempt,
+      this.#store,
+      this.#logEvent.bind(this),
+      this.#logSafely.bind(this),
+    );
     const recovered = await this.#recoverDurableRun(prepared, attempt);
     if (recovered.kind === "outcome" || recovered.kind === "recovery-required") {
       return recovered.outcome;
@@ -293,6 +299,14 @@ export class CursorImplementer {
     } as const;
     const current = await Agent.getRun(attempt.cursorRunId, options);
     if (current.status !== "running") return;
+    if (
+      !supportsRunOperation(current, "wait")
+      || !supportsRunOperation(current, "cancel")
+    ) {
+      throw new Error(
+        `RECOVERY_REQUIRED: Cursor run ${attempt.cursorRunId} is detached; cancellation cannot be confirmed without a live executor.`,
+      );
+    }
     await Agent.cancelRun(attempt.cursorRunId, options);
     const persisted = await Agent.getRun(attempt.cursorRunId, options);
     if (persisted.status === "running") {
@@ -377,9 +391,6 @@ export class CursorImplementer {
         );
       }
       const recoveredAgentId = agentId ?? priorRun.agentId;
-      if (priorRun.status === "running" && hasPersistedOutcome(attempt)) {
-        priorRun = await this.#stopPriorRun(runId, options);
-      }
       if (priorRun.status === "running") {
         if (!supportsRunOperation(priorRun, "wait")) {
           return {
@@ -387,6 +398,11 @@ export class CursorImplementer {
             outcome: detachedRunOutcome(priorRun, attempt, recoveredAgentId),
           };
         }
+        if (hasPersistedOutcome(attempt)) {
+          priorRun = await this.#stopPriorRun(runId, options);
+        }
+      }
+      if (priorRun.status === "running") {
         return { kind: "active", run: priorRun };
       }
       const outcome = restoredOutcome(priorRun, attempt, recoveredAgentId, runId);
@@ -547,6 +563,7 @@ export class CursorImplementer {
           this.#store,
           submitted,
           this.#logSafely.bind(this),
+          this.#logEvent.bind(this),
         );
       } catch (error) {
         if (!isRecoverableCursorRunError(error)) throw error;
@@ -629,6 +646,14 @@ export class CursorImplementer {
       // Diagnostics are non-authoritative; logging failures must not alter the
       // durable run outcome or hide an uncertain transport error.
     }
+  }
+
+  async #logEvent(eventKey: string, message: string): Promise<void> {
+    if (this.#logger.logEvent) {
+      await this.#logger.logEvent(eventKey, message);
+      return;
+    }
+    await this.#logger.log(message);
   }
 
   async #delayAfterTransportFailure(retry: number): Promise<void> {

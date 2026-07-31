@@ -5,6 +5,10 @@ import type {
   JobEvent,
   JobMetrics,
 } from "../domain/job.js";
+import type {
+  PendingRunEvent,
+  RunEventDeliveryState,
+} from "../application/workflow-ports.js";
 import {
   optionalString,
   rowToEffect,
@@ -84,39 +88,128 @@ export class SqliteStateLedger {
     `).run(jobId, attemptId ?? null, type, JSON.stringify(data), createdAt);
   }
 
-  consumeRunEvent(
+  beginRunEvent(
     jobId: string,
     attemptId: string,
     workerToken: string,
     runId: string,
     eventKey: string,
-  ): boolean {
+    eventSummary: string,
+  ): RunEventDeliveryState {
     const consumedAt = nowIso();
     this.#database.exec("BEGIN IMMEDIATE");
     try {
-      const active = this.#database.prepare(`
-        SELECT 1
-        FROM attempts a
-        JOIN jobs j ON j.id = a.job_id
-        WHERE a.id = ?
-          AND a.job_id = ?
-          AND a.worker_token = ?
-          AND j.current_attempt_id = a.id
-          AND a.status IN ('PREPARING', 'IMPLEMENTING', 'VERIFYING', 'REPAIRING', 'PUBLISHING')
-      `).get(attemptId, jobId, workerToken) as Record<string, unknown> | undefined;
-      if (!active) throw new Error(`Active attempt lease was lost: ${attemptId}`);
+      this.#assertActiveRunEventClaim(jobId, attemptId, workerToken);
       const result = this.#database.prepare(`
         INSERT INTO cursor_run_event_consumptions (
-          run_id, event_key, job_id, attempt_id, consumed_at
-        ) VALUES (?, ?, ?, ?, ?)
+          run_id, event_key, job_id, attempt_id, event_summary, status, consumed_at
+        ) VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
         ON CONFLICT(run_id, event_key) DO NOTHING
-      `).run(runId, eventKey, jobId, attemptId, consumedAt);
+      `).run(runId, eventKey, jobId, attemptId, eventSummary, consumedAt);
+      const row = this.#database.prepare(`
+        SELECT job_id, attempt_id, event_summary, status
+        FROM cursor_run_event_consumptions
+        WHERE run_id = ? AND event_key = ?
+      `).get(runId, eventKey) as Record<string, unknown> | undefined;
+      if (!row) throw new Error(`Failed to create or load Cursor run event: ${runId}/${eventKey}`);
+      if (String(row.job_id) !== jobId || String(row.attempt_id) !== attemptId) {
+        throw new Error(`Cursor run event identity collision: ${runId}/${eventKey}`);
+      }
+      const status = String(row.status);
+      let deliveryState: RunEventDeliveryState;
+      if (status === "LOGGED") {
+        deliveryState = "LOGGED";
+      } else if (status === "PENDING") {
+        if (String(row.event_summary) !== eventSummary) {
+          throw new Error(`Cursor run event payload collision: ${runId}/${eventKey}`);
+        }
+        deliveryState = result.changes === 1 ? "NEW" : "PENDING";
+      } else {
+        throw new Error(`Unknown Cursor run event delivery state: ${status}`);
+      }
       this.#database.exec("COMMIT");
-      return result.changes === 1;
+      return deliveryState;
     } catch (error) {
       this.#database.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  completeRunEvent(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    runId: string,
+    eventKey: string,
+  ): void {
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#assertActiveRunEventClaim(jobId, attemptId, workerToken);
+      const result = this.#database.prepare(`
+        UPDATE cursor_run_event_consumptions
+        SET status = 'LOGGED', logged_at = COALESCE(logged_at, ?)
+        WHERE run_id = ? AND event_key = ? AND job_id = ? AND attempt_id = ?
+      `).run(nowIso(), runId, eventKey, jobId, attemptId);
+      if (result.changes !== 1) {
+        const row = this.#database.prepare(`
+          SELECT status FROM cursor_run_event_consumptions
+          WHERE run_id = ? AND event_key = ? AND job_id = ? AND attempt_id = ?
+        `).get(runId, eventKey, jobId, attemptId) as Record<string, unknown> | undefined;
+        if (!row) throw new Error(`Unknown Cursor run event: ${runId}/${eventKey}`);
+        if (String(row.status) !== "LOGGED") {
+          throw new Error(`Could not complete Cursor run event: ${runId}/${eventKey}`);
+        }
+      }
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listPendingRunEvents(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    runId: string,
+  ): PendingRunEvent[] {
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#assertActiveRunEventClaim(jobId, attemptId, workerToken);
+      const rows = this.#database.prepare(`
+        SELECT run_id, event_key, event_summary
+        FROM cursor_run_event_consumptions
+        WHERE job_id = ? AND attempt_id = ? AND run_id = ? AND status = 'PENDING'
+        ORDER BY consumed_at, event_key
+      `).all(jobId, attemptId, runId) as Array<Record<string, unknown>>;
+      this.#database.exec("COMMIT");
+      return rows.map((row) => ({
+        runId: String(row.run_id),
+        eventKey: String(row.event_key),
+        eventSummary: String(row.event_summary),
+      }));
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  #assertActiveRunEventClaim(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+  ): void {
+    const active = this.#database.prepare(`
+      SELECT 1
+      FROM attempts a
+      JOIN jobs j ON j.id = a.job_id
+      WHERE a.id = ?
+        AND a.job_id = ?
+        AND a.worker_token = ?
+        AND j.current_attempt_id = a.id
+        AND a.status IN ('PREPARING', 'IMPLEMENTING', 'VERIFYING', 'REPAIRING', 'PUBLISHING')
+    `).get(attemptId, jobId, workerToken) as Record<string, unknown> | undefined;
+    if (!active) throw new Error(`Active attempt lease was lost: ${attemptId}`);
   }
 
   listEvents(jobId: string): JobEvent[] {

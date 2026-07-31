@@ -1,9 +1,11 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { JobStore, STATE_SCHEMA_VERSION } from "../src/state.js";
+import { drainPendingRunEvents, deliverRunEvent } from "../src/adapters/cursor-run-event-outbox.js";
+import { FileWorkflowLogger } from "../src/adapters/workflow-logger.js";
 
 const stores: JobStore[] = [];
 
@@ -344,10 +346,11 @@ describe("job state", () => {
     });
     const original = first.claimNext("worker-1", 1_000, new Date("2026-07-23T00:00:00.000Z"))!;
     first.transitionAttempt(original.attempt.id, "worker-1", ["PREPARING"], "IMPLEMENTING");
-    expect(first.consumeRunEvent(job.id, original.attempt.id, "worker-1", "run-1", "offset:1"))
-      .toBe(true);
-    expect(first.consumeRunEvent(job.id, original.attempt.id, "worker-1", "run-1", "offset:1"))
-      .toBe(false);
+    expect(first.beginRunEvent(job.id, original.attempt.id, "worker-1", "run-1", "offset:1", "assistant running"))
+      .toBe("NEW");
+    first.completeRunEvent(job.id, original.attempt.id, "worker-1", "run-1", "offset:1");
+    expect(first.beginRunEvent(job.id, original.attempt.id, "worker-1", "run-1", "offset:1", "assistant running"))
+      .toBe("LOGGED");
     const firstIndex = stores.indexOf(first);
     stores.splice(firstIndex, 1);
     first.close();
@@ -360,27 +363,101 @@ describe("job state", () => {
       new Date("2026-07-23T00:00:02.000Z"),
     )!;
     expect(reclaimed.resumed).toBe(true);
-    expect(() => second.consumeRunEvent(
+    expect(() => second.beginRunEvent(
       job.id,
       original.attempt.id,
       "worker-1",
       "run-1",
       "offset:2",
+      "tool completed",
     )).toThrow(/lease/i);
-    expect(second.consumeRunEvent(
+    expect(second.beginRunEvent(
       job.id,
       reclaimed.attempt.id,
       "worker-2",
       "run-1",
       "offset:1",
-    )).toBe(false);
-    expect(second.consumeRunEvent(
+      "assistant running",
+    )).toBe("LOGGED");
+    expect(second.beginRunEvent(
       job.id,
       reclaimed.attempt.id,
       "worker-2",
       "run-1",
       "offset:2",
-    )).toBe(true);
+      "tool completed",
+    )).toBe("NEW");
+    second.completeRunEvent(job.id, reclaimed.attempt.id, "worker-2", "run-1", "offset:2");
+  });
+
+  it("replays a pending event after log failure and never duplicates the confirmed line", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "cursor-state-event-outbox-"));
+    const databaseFile = path.join(dir, "jobs.sqlite");
+    const missingLogPath = path.join(dir, "missing", "job.log");
+    const logPath = path.join(dir, "job.log");
+    const first = new JobStore(databaseFile);
+    stores.push(first);
+    const job = first.createOrGet({
+      repositoryAlias: "demo", taskId: "TASK-OUTBOX", specVersion: 1, specHash: "sha256:outbox",
+      taskCommitSha: "a".repeat(40), taskBlobSha: "b".repeat(40),
+      targetOrigin: "owner/demo", targetBaseSha: "c".repeat(40), policyVersion: 2, maxAttempts: 1,
+    });
+    first.update(job.id, { logPath: missingLogPath });
+    const original = first.claimNext("worker-1", 1_000, new Date("2026-07-23T00:00:00.000Z"))!;
+    first.transitionAttempt(original.attempt.id, "worker-1", ["PREPARING"], "IMPLEMENTING");
+    const originalAttempt = first.updateAttempt(original.attempt.id, "worker-1", {
+      cursorRunId: "run-outbox",
+    });
+    const failingLogger = new FileWorkflowLogger(first, job.id);
+    await deliverRunEvent(
+      job.id,
+      originalAttempt,
+      first,
+      "run-outbox",
+      "offset:1",
+      "assistant running",
+      (eventKey, message) => failingLogger.logEvent(eventKey, message),
+      async () => undefined,
+    );
+    expect(first.listPendingRunEvents(
+      job.id,
+      original.attempt.id,
+      "worker-1",
+      "run-outbox",
+    )).toHaveLength(1);
+    const firstIndex = stores.indexOf(first);
+    stores.splice(firstIndex, 1);
+    first.close();
+
+    const second = new JobStore(databaseFile);
+    stores.push(second);
+    second.update(job.id, { logPath });
+    const reclaimed = second.claimNext(
+      "worker-2",
+      60_000,
+      new Date("2026-07-23T00:00:02.000Z"),
+    )!;
+    const logger = new FileWorkflowLogger(second, job.id);
+    const logEvent = (eventKey: string, message: string): Promise<void> => logger.logEvent(eventKey, message);
+    await drainPendingRunEvents(job.id, reclaimed.attempt, second, logEvent, async () => undefined);
+    await drainPendingRunEvents(job.id, reclaimed.attempt, second, logEvent, async () => undefined);
+
+    const log = await readFile(logPath, "utf8");
+    expect(log.match(/CURSOR_RUN_EVENT:offset:1/g)).toHaveLength(1);
+    expect(second.listPendingRunEvents(
+      job.id,
+      reclaimed.attempt.id,
+      "worker-2",
+      "run-outbox",
+    )).toHaveLength(0);
+    expect(second.beginRunEvent(
+      job.id,
+      reclaimed.attempt.id,
+      "worker-2",
+      "run-outbox",
+      "offset:1",
+      "assistant running",
+    )).toBe("LOGGED");
   });
 
   it("summarizes local delivery and first-attempt effectiveness", async () => {

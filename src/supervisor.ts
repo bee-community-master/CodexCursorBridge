@@ -10,6 +10,7 @@ import { processClaim } from "./worker.js";
 
 const claimLeaseMs = 60_000;
 const heartbeatIntervalMs = 15_000;
+const shutdownPollMs = 25;
 const idlePollMs = 1_000;
 const supervisorBackoffBaseMs = 250;
 const supervisorBackoffCapMs = 30_000;
@@ -110,6 +111,11 @@ export async function runSupervisor(
         void logSupervisorFailure(paths, "heartbeat", error);
       }
     }, heartbeatMs);
+    const shutdownWatcher = setInterval(() => {
+      if (!shouldStop()) return;
+      clearInterval(heartbeat);
+      clearInterval(shutdownWatcher);
+    }, shutdownPollMs);
     try {
       await processClaimImpl(store, claim, paths);
       failureStreak = 0;
@@ -123,6 +129,7 @@ export async function runSupervisor(
       await sleep(supervisorBackoffMs(failureStreak));
     } finally {
       clearInterval(heartbeat);
+      clearInterval(shutdownWatcher);
     }
   }
 }

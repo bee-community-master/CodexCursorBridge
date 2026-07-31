@@ -26,7 +26,87 @@ function runtimePaths(root: string): RuntimePaths {
   };
 }
 
+async function runPendingClaimShutdownChild(
+  signal: "SIGTERM" | "SIGINT",
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; elapsedMs: number; stderr: string }> {
+  const script = `
+    import { mkdtemp } from "node:fs/promises";
+    import os from "node:os";
+    import path from "node:path";
+    const { JobStore } = await import("./src/state.ts");
+    const { runSupervisor } = await import("./src/supervisor.ts");
+    const root = await mkdtemp(path.join(os.tmpdir(), "cursor-supervisor-shutdown-"));
+    const store = new JobStore(path.join(root, "jobs.sqlite"));
+    store.createOrGet({
+      repositoryAlias: "demo", taskId: "TASK-SHUTDOWN", specVersion: 1, specHash: "sha256:shutdown",
+      taskCommitSha: "a".repeat(40), taskBlobSha: "b".repeat(40),
+      targetOrigin: "owner/demo", targetBaseSha: "c".repeat(40),
+      policyVersion: 2, maxAttempts: 1,
+    });
+    let stopping = false;
+    process.once(${JSON.stringify(signal)}, () => { stopping = true; });
+    const paths = {
+      projectRoot: root, home: root, configFile: path.join(root, "config.json"),
+      databaseFile: path.join(root, "jobs.sqlite"), logsDir: path.join(root, "logs"),
+      reportsDir: path.join(root, "reports"), worktreesDir: path.join(root, "worktrees"),
+      tasksDir: path.join(root, "tasks"),
+    };
+    runSupervisor(store, paths, {
+      workerToken: "shutdown-worker",
+      claimLeaseMs: 100,
+      heartbeatIntervalMs: 20,
+      shouldStop: () => stopping,
+      processClaim: async () => {
+        process.stdout.write("READY\\n");
+        await new Promise(() => undefined);
+      },
+    }).catch(() => undefined);
+  `;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "pipe", "pipe"],
+    env: process.env,
+  });
+  let stdout = "";
+  let stderr = "";
+  const startedAt = Date.now();
+  return new Promise((resolve, reject) => {
+    let signalled = false;
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`shutdown child timed out for ${signal}; stderr=${stderr}`));
+    }, 2_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+      if (!signalled && stdout.includes("READY")) {
+        signalled = true;
+        child.kill(signal);
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("exit", (code, childSignal) => {
+      clearTimeout(timeout);
+      resolve({ code, signal: childSignal, elapsedMs: Date.now() - startedAt, stderr });
+    });
+  });
+}
+
 describe("durable supervisor recovery", () => {
+  it("clears the claim heartbeat on SIGTERM and SIGINT while processClaim is unresolved", async () => {
+    for (const signal of ["SIGTERM", "SIGINT"] as const) {
+      const result = await runPendingClaimShutdownChild(signal);
+      expect(result, `${signal} stderr: ${result.stderr}`).toMatchObject({
+        code: 0,
+        signal: null,
+      });
+      expect(result.elapsedMs).toBeLessThan(1_500);
+    }
+  });
+
   it("keeps a pending claim alive long enough for a referenced heartbeat to advance the lease", async () => {
     const script = `
       import { mkdtemp } from "node:fs/promises";
