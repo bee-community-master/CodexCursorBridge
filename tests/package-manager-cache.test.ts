@@ -18,6 +18,7 @@ import {
 } from "../src/adapters/package-manager-cache.js";
 import { provisionPackageManagerManifest } from "../src/adapters/package-manager-provenance.js";
 import { PACKAGE_MANAGER_DIGEST_VERSION } from "../src/adapters/package-manager-provenance-loader.js";
+import { packageManagerOptionCatalog } from "../src/adapters/package-manager-option-catalog.js";
 import { createVerificationSandbox } from "../src/sandbox.js";
 
 const fakePackageManagerSpec = {
@@ -144,6 +145,8 @@ describe("independent package-manager staging", () => {
     ["--changed-files-ignore-pattern", "*.md", "exec", "pnpm", "--version"],
     ["--filter-prod", "workspace", "exec", "pnpm", "--version"],
     ["--test-pattern", "*.test.ts", "exec", "pnpm", "--version"],
+    ["--node-package-map-type", "loose", "exec", "node", "--version"],
+    ["--node-package-map-type=loose", "exec", "node", "--version"],
     ["--pm-on-fail=ignore"],
     ["--filter", "workspace", "dlx", "pnpm", "--version"],
     ["--config.manage-package-manager-versions=true"],
@@ -161,6 +164,14 @@ describe("independent package-manager staging", () => {
   ])("allows dangerous words as pnpm script names: %s", (...args: string[]) => {
     expect(() => assertPackageManagerControlArgs(args)).not.toThrow();
   });
+
+  it.each(packageManagerOptionCatalog.valueOptions)(
+    "treats pnpm rc value option as an option value: --%s",
+    (option) => {
+      expect(() => assertPackageManagerControlArgs([`--${option}`, "value", "exec", "node"]))
+        .toThrow(/package-manager|switch/i);
+    },
+  );
 
   it("rejects every COREPACK_* task environment override", () => {
     expect(() => assertPackageManagerEnvironment({ COREPACK_ROOT: "/tmp/attacker" }))

@@ -14,6 +14,7 @@ import {
   assertStagedPackageManager,
   stagePackageManager,
 } from "./package-manager-cache.js";
+import { packageManagerOptionCatalog } from "./package-manager-option-catalog.js";
 import type { PreparedWorktreeGuard } from "./prepared-worktree-guard.js";
 import type { WorkflowLogger } from "./workflow-logger.js";
 
@@ -28,28 +29,13 @@ function usesPnpm(command: string): command is PackageManagerBinary {
   return command === "pnpm" || command === "pnpx";
 }
 
-const packageManagerValueOptions = new Set([
-  "--changed-files-ignore-pattern",
-  "--child-concurrency",
-  "--dir",
-  "--filter",
-  "--filter-prod",
-  "--loglevel",
-  "--lockfile-dir",
-  "--network-concurrency",
-  "--package-import-method",
-  "--prefix",
-  "--reporter",
-  "--resume-from",
-  "--config",
-  "--store-dir",
-  "--test-pattern",
-  "--use-node-version",
-  "--virtual-store-dir",
-  "--workspace-concurrency",
-]);
+const packageManagerValueOptions = new Set(
+  packageManagerOptionCatalog.valueOptions.map((option) => `--${option}`),
+);
 
-const packageManagerShortValueOptions = new Set(["C", "F"]);
+const packageManagerShortValueOptions = new Set(
+  Object.keys(packageManagerOptionCatalog.shortValueOptions),
+);
 
 const dangerousPackageManagerCommands = new Set([
   "exec",
