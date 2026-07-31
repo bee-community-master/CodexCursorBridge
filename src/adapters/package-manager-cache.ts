@@ -114,10 +114,25 @@ async function copyReadOnlyCache(
 ): Promise<boolean> {
   const source = packageDirectory(sourceHome, spec);
   if (!await isDirectory(source)) return false;
+  await assertArtifactTree(source);
   const target = packageDirectory(targetHome, spec);
   await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
   await cp(source, target, { recursive: true, force: false });
   return true;
+}
+
+async function assertArtifactTree(root: string): Promise<void> {
+  const entries = await readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    const child = path.join(root, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error("Independent verifier package cache may not contain symbolic links");
+    }
+    if (entry.isDirectory()) await assertArtifactTree(child);
+    else if (!entry.isFile()) {
+      throw new Error("Independent verifier package cache contains an unsupported entry");
+    }
+  }
 }
 
 async function assertPackageManagerCache(
