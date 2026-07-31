@@ -1,0 +1,317 @@
+id: TASK-FAMNEST-730-REPAIR-V2
+repository: famnest
+title: Repair operational-memory trial application review and undo lifecycle on PR 779
+spec_version: 2
+goal: "Repair the preserved #730 implementation on draft PR #779 so trial scheduling, lifecycle
+  invalidation, application execution, worker claiming, immutable persistence, safe undo, and
+  generated-client-backed Web/Android/iOS experiences are real fail-closed product behavior rather
+  than request-trusting or audit-only simulation. Preserve the exact Wave3 ancestry: checkpoint
+  3fa5828d1278f01f8108acd9892ee0a6ce104444 must descend directly from the approved Wave3 base
+  7c3f7a7b82b8af1903d09a512906dc1c931c65c4 without rebasing or importing another issue."
+context_files:
+  - AGENTS.md
+  - docs/operations/build-contract.md
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - docs/engineering/backend-architecture.md
+  - docs/engineering/web-architecture.md
+  - docs/engineering/android-architecture.md
+  - docs/engineering/ios-architecture.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/operational-memory-trial-contract-v1.json
+  - packages/shared-types/fixtures/operational-memory-application-contract-v1.json
+  - services/backend/src/famnest_backend/api/v1/operational_memories.py
+  - services/backend/src/famnest_backend/application/operational_memory_applications.py
+  - services/backend/src/famnest_backend/application/operational_memory_trials.py
+  - services/backend/src/famnest_backend/application/operational_memories.py
+  - services/backend/src/famnest_backend/application/ports/operation_repository.py
+  - services/backend/src/famnest_backend/application/worker_ops.py
+  - services/backend/src/famnest_backend/repositories/operations_adapters.py
+  - services/backend/src/famnest_backend/repositories/postgres_operational_memory_records.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_sync.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/operations/accessors.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/family/accessors.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/admin/privacy_purge_lifecycle.py
+  - services/backend/tests/test_operational_memory_trials.py
+  - services/backend/tests/test_operational_memory_applications.py
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - services/backend/tests/test_operations.py
+  - services/backend/tests/test_storage_privacy.py
+  - apps/web/src/lib/famnest/famnestWebAdapters.ts
+  - apps/web/src/routes/families/[familyId]/operational-memory/+page.svelte
+  - apps/android/src/main/java/com/elevife/famnest/android/FamNestAndroidUseCaseModule.kt
+  - apps/android/src/main/java/com/elevife/famnest/android/FamNestAndroidSettingsActionBindings.kt
+  - apps/ios/Sources/FamNestIOSApp/Composition/AppDependencyContainer.swift
+allowed_paths:
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/**
+  - services/backend/src/famnest_backend/api/v1/operational_memories.py
+  - services/backend/src/famnest_backend/application/operational_memory*.py
+  - services/backend/src/famnest_backend/application/operational_consent*.py
+  - services/backend/src/famnest_backend/application/consent_policy.py
+  - services/backend/src/famnest_backend/application/dto/operational*.py
+  - services/backend/src/famnest_backend/application/ports/operational*.py
+  - services/backend/src/famnest_backend/repositories/postgres_operational*.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/operations/**
+  - services/backend/tests/**operational_memory**
+  - services/backend/tests/**operational_consent**
+  - services/backend/tests/test_consent_policy.py
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - supabase/migrations/**
+  - apps/web/src/lib/api/generated/**
+  - apps/web/src/lib/famnest/features/operationalMemory*.ts
+  - apps/web/src/lib/famnest/features/operationalConsent*.ts
+  - apps/web/src/lib/famnest/features/operations/**
+  - apps/web/src/routes/families/**
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/**
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOperationalMemoryApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOperationalConsentApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/operations/**
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/**Operational**
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/**
+  - apps/android/presentation/src/test/java/com/elevife/famnest/android/ui/**
+  - apps/ios/Sources/FamNestIOSCore/API/APIOperational*.swift
+  - apps/ios/Sources/FamNestIOSCore/**
+  - apps/ios/Sources/FamNestIOSApp/AppShell/FamilyOperationSettings/**
+  - apps/ios/Sources/FamNestIOSApp/Features/**
+  - apps/ios/Tests/**
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/operations/**
+  - apps/ios/FamNestIOSApp.xcodeproj/project.pbxproj
+  - scripts/checks/check_backend_fast_shard_collect.py
+  - services/backend/src/famnest_backend/api/dependencies.pyi
+  - services/backend/src/famnest_backend/api/dependency_modules/use_case_factories/operational_memory_source_proposals.py
+  - services/backend/src/famnest_backend/application/operational_memories.py
+  - services/backend/src/famnest_backend/application/ports/operation_repository.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/contexts.py
+  - services/backend/src/famnest_backend/repositories/operations_adapters.py
+  - services/backend/src/famnest_backend/repositories/postgres_collection_policies.py
+  - services/backend/src/famnest_backend/repositories/postgres_domain_method_policies.py
+  - services/backend/src/famnest_backend/repositories/postgres_load_policies.py
+  - services/backend/src/famnest_backend/repositories/postgres_persist_policies.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_load_operations.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_sync.py
+  - services/backend/src/famnest_backend/application/worker_ops.py
+  - services/backend/src/famnest_backend/application/dto/worker_ops.py
+  - services/backend/src/famnest_backend/application/ports/worker_family_operations.py
+  - services/backend/src/famnest_backend/application/ports/worker_privacy_purge.py
+  - services/backend/src/famnest_backend/api/v1/internal_worker_ops.py
+  - services/backend/src/famnest_backend/api/v1/operations.py
+  - services/backend/src/famnest_backend/api/dependency_modules/use_case_factories/operations.py
+  - services/backend/src/famnest_backend/api/dependency_modules/use_case_factories/public_worker.py
+  - services/backend/src/famnest_backend/repositories/postgres_operations_runtime_wrappers.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/admin/privacy_purge_lifecycle.py
+  - services/backend/src/famnest_backend/application/operations.py
+  - services/backend/src/famnest_backend/application/ports/operation_settings.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/family/accessors.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/family/settings_lifecycle.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/family/repository_capability.py
+  - services/backend/src/famnest_backend/repositories/postgres_family_runtime_wrappers.py
+  - services/backend/tests/test_operations.py
+  - services/backend/tests/test_storage_privacy.py
+  - apps/web/src/lib/famnest/famnestWebAdapters.ts
+  - apps/web/src/lib/famnest/famnestWebAdapters.test-support.ts
+  - apps/android/application/src/test/**
+  - apps/android/src/main/java/com/elevife/famnest/android/FamNestAndroidUseCaseModule.kt
+  - apps/android/src/main/java/com/elevife/famnest/android/FamNestAndroidSettingsActionBindings.kt
+  - apps/android/src/test/**
+  - apps/ios/Sources/FamNestIOSApp/Adapters/API/OperationalMemory*.swift
+  - apps/ios/Sources/FamNestIOSApp/Composition/**
+forbidden_paths:
+  - .env
+  - .env.*
+  - "**/.env"
+  - "**/.env.*"
+  - "**/credentials/**"
+  - "**/secrets/**"
+  - artifacts/private/**
+  - scripts/release/**
+  - scripts/deploy/**
+  - deployment/**
+  - "**/deployment/**"
+  - infra/**
+  - "**/production/**"
+  - supabase/config.toml
+  - "**/google-services.json"
+  - "**/GoogleService-Info.plist"
+non_goals:
+  - Do not add a fake, in-memory-only, audit-only, or status-only substitute for a resource
+    mutation, claim worker, durable outbox, trial invalidation, or undo effect.
+  - "Do not implement provider-specific resolver behavior owned by #753 or notification delivery
+    owned by #754. Integrate only through their bounded capability and opaque outbox contracts."
+  - Do not let legacy_unreviewed, high, very_high, delete, or purge enter generic trial or undo.
+  - Do not store sensitive memory text, provider payloads, raw child/member attribution,
+    credentials, contacts, or other protected content in public DTOs, audit JSON, metrics, or
+    notifications.
+  - Do not claim production scheduler execution, provider deliverability, migration, device/store
+    readiness, or product impact from repository evidence.
+acceptance_criteria:
+  - "Execution and undo are real and server-authoritative. Requests carry only lifecycle/resource
+    identity, idempotency identity, and expected resource revision. The server derives the exact
+    action registry entry, risk and resource type, affected members, current consent, source,
+    protection, human-edit, completion/cancel, safety, and agreement-conflict state. Spoofed action,
+    resource, affected-member, risk, or protection data is rejected. A supported execute invokes the
+    real #753 adapter effect with resource CAS; immutable application audit and opaque #754 outbox
+    are committed atomically with that effect. Concurrent execute/replay produces one effect. Undo
+    rereads current revision and field provenance, reverts only a safe subset that preserves later
+    human edits, and records undone only after the real revert commits exactly once."
+  - "When the #753 adapter for an action/resource is absent or incomplete, preview may return an
+    explicit unavailable capability and explanation, but execute must fail closed as blocked or a
+    typed capability error and must never return applied, advance a revision, or emit an applied
+    audit/outbox event. High, very_high, delete, and purge use their bounded-context recovery path,
+    not generic undo. Reversible low/medium undo obeys the shorter of registry TTL and 24 hours with
+    exact before/at/after-boundary and concurrent execute/undo coverage."
+  - One central invalidation coordinator receives material edit, pause, revoke, consent withdrawal
+    or expiry, safety block, source invalidation, member leave/deactivation, and relevant registry
+    or agreement changes. It immediately fail-closes every applicable scheduled/active/review-due
+    trial and application, synchronizes operational-memory status, and emits one immutable reasoned
+    transition. Material review creates a real patched revision, computes exact changed field paths
+    server-side, records material decision/reason immutably, invalidates old consent/approval/trial,
+    and restarts the required lifecycle; client booleans are never authority.
+  - "Trial eligibility and schedule are server-authoritative: exact memory/policy revision and
+    linkage, #729 final consent timestamp and affected-member quorum, registry risk/mode, current
+    member/source/safety/agreement state, and family-settings IANA timezone are validated. The next
+    local-midnight half-open 14-calendar-day window snapshots local/UTC endpoints, timezone ID, and
+    offset. Pre-start timezone change rebooks a new revision; an active boundary never moves. Expiry
+    uses 30 family-local calendar days and periodic review uses true 6/12 calendar months, including
+    DST gaps/folds, month ends, timezone change, and legacy first-material-edit behavior."
+  - "A production worker path claims due starts, ends, expiries, and 6/12-month reviews through the
+    authoritative database. Atomic claims have visibility timeout/lease, unique claim token and
+    owner fencing, stale-claim recovery, and at-least-once replay safety. Trial state,
+    operational-memory state, append-only transition/application/version audit, and one opaque #754
+    outbox record share a transaction and unique transition/outbox keys. Crash before/after commit,
+    retry, restart, skew, stale owner, and overlapping workers never wedge work or duplicate a state
+    transition, side effect, audit row, or outbox event."
+  - "Persistence and authorization are complete. Application and transition history is append-only,
+    while mutable projections are separate. Raw affected-member attribution is stored only in an
+    access-restricted relation or opaque reference, never public DTO/audit JSON. RLS and service
+    authorization enforce parent, child, unrelated, affected-member, role, and cross-family
+    boundaries on actual FastAPI reads and writes against a freshly migrated PostgreSQL database.
+    #768 retention/purge worker and privacy family-lock paths include all new audit, projection,
+    outbox, and attribution data without weakening required immutable retention."
+  - The OpenAPI document and generated clients expose trial create/get/review and application
+    preview/execute/list/get/undo with exhaustive statuses and typed revision, idempotency,
+    capability, redaction, and error shapes. Web uses the generated client rather than hardcoded
+    trial_active/applied samples. Android wires transport/repository/use case/DI/ViewModel/Compose
+    actions. iOS wires API gateway/composition/navigation/actions. All platforms distinguish preview
+    from applied, expose consent, scheduled, active, review, paused, expired, blocked, skipped,
+    failed, undone, and undo-conflict states, and provide continue/modify/stop and safe undo CTAs.
+  - Web, Android, and iOS show loading, offline, stale, retryable and terminal errors with role-safe
+    redaction; actions are discoverable through normal family-operation navigation and meet platform
+    accessibility semantics for labels, focus/reading order, status announcements, touch targets,
+    dynamic text, contrast, and disabled/busy states. Integration tests prove real generated-client
+    requests, state updates, error rendering, navigation, and no protected-memory disclosure.
+  - The preserved PR checkpoint remains descended from exact Wave3 base
+    7c3f7a7b82b8af1903d09a512906dc1c931c65c4, contains no unrelated Wave3 issue, and finishes with
+    all specified focused, migrated-database, generated-contract, and repository-wide verification
+    passing. Test assertions must prove exact time, transition, CAS, mutation, restart, RLS, and UI
+    outcomes rather than tautologies, mocks of the behavior under test, or status-only simulations.
+implementation_constraints:
+  - "Begin from draft PR #779 at exact checkpoint 3fa5828d1278f01f8108acd9892ee0a6ce104444; stop if
+    its head moved, it is not open/draft, or its merge-base with main is not exact Wave3 base
+    7c3f7a7b82b8af1903d09a512906dc1c931c65c4."
+  - Keep the v1 implementation and its justified integration paths, repairing or replacing flawed
+    behavior without deleting tests merely to pass gates. Do not import commits or code owned by
+    another Wave3 issue.
+  - Reuse existing domain ports, transaction boundaries, worker infrastructure, generated-client
+    workflows, DI/composition conventions, privacy locks, and architecture constraints; add no
+    parallel in-memory authority or bypass around canonical persistence and authorization.
+  - Use authoritative server reads and typed capability results at every trust boundary. Client
+    request fields, display state, cached DTOs, and audit rows are not authoritative lifecycle,
+    registry, consent, protection, resource-revision, or risk inputs.
+  - Keep audit/outbox payloads content-free and provenance explicit. Use append-only events with
+    deterministic unique keys, and make mutable status a separately derived projection.
+verification:
+  commands:
+    - command: pnpm
+      args:
+        - run
+        - verify:all
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 3600
+    - command: pnpm
+      args:
+        - run
+        - verify:python:fast
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:openapi:full
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1200
+    - command: pnpm
+      args:
+        - run
+        - test:backend:db-smoke
+      env:
+        UV_CACHE_DIR: .uv-cache
+        FAMNEST_BACKEND_DB_SMOKE_APPLY_MIGRATIONS: "1"
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:migrations
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 900
+  profile_hash: sha256:9cd23759c439791ee18b080f15879952e60164c09aa075c0fd14047c7f9fe767
+required_new_tests:
+  - "Add real-adapter mutation and server-authority tests for action/resource/affected-member/risk/
+    protection spoofing, missing #753 capability fail-closed behavior, CAS, idempotent replay,
+    atomic audit/outbox, partial safe application, concurrent execute, actual safe-subset undo, and
+    undo TTL immediately before, exactly at, and immediately after expiry."
+  - "Add central invalidation tests from every production mutation path: material edit, pause,
+    revoke, consent withdrawal/expiry, safety block, source invalidation, member leave/deactivation,
+    registry change, and agreement change. Prove exact revision/link/quorum validation,
+    authoritative consent timestamp/timezone, actual review patch audit, family-local 14/30-day and
+    6/12-month calculations, DST gap/fold, month-end, pre-start rebook, fixed active boundary, and
+    legacy first material edit."
+  - Add migrated-PostgreSQL worker and API tests for atomic claim, lease/visibility timeout,
+    fencing, stale recovery, two-worker contention, crash/restart before and after commit,
+    synchronized memory and trial state, unique transition/outbox keys, append-only audit/version
+    history, parent/child/ unrelated/cross-family RLS reads and writes, restricted attribution,
+    retention purge, and privacy family-lock behavior.
+  - Add OpenAPI regeneration and Web/Android/iOS integration tests proving generated-client calls
+    for schedule/get/review/preview/execute/list/get/undo, exhaustive lifecycle/application/error
+    states, preview-versus-applied copy, loading/offline/stale/retry/terminal errors, role-safe
+    redaction, CTA state changes, accessibility semantics, and navigation discoverability.
+  - Run the full repository gates and add regression assertions for exact boundary instants,
+    concurrent execution/undo, stale revisions and owners, migrated DB/RLS mutations, actual
+    resource effects, restart durability, and failure visibility. Remove tautological assertions and
+    prove report counts and generated artifacts match the final tree.
+limits:
+  max_changed_files: 500
+  max_diff_lines: 100000
+  allow_test_deletion: false
+  max_repair_attempts: 2
+stop_conditions:
+  - "Draft PR #779 is closed, non-draft, moved from checkpoint
+    3fa5828d1278f01f8108acd9892ee0a6ce104444 before dispatch, or no longer has exact Wave3 base
+    7c3f7a7b82b8af1903d09a512906dc1c931c65c4 as its merge-base."
+  - A requested behavior requires credentials, production deployment, a live provider/notification
+    service, production database mutation, store submission, or device-only evidence.
+  - "A provider-specific #753 resolver or #754 delivery implementation is required beyond capability
+    negotiation, adapter invocation, and the opaque outbox contract."
+  - Any repair would weaken fail-closed execution, consent withdrawal, human/source protection,
+    high-risk approval, privacy, RLS, idempotency, CAS, fencing, immutable audit, or retention.
+pull_request:
+  mode: existing_pr
+  number: 779
+status: approved
+spec_hash: sha256:81c369b1934ebecb52482aae9dd246962abaa382f419118474b9f8da4c044116
+policy_version: 3
+target:
+  origin: HearingOffice/elevife-famnest
+  base_ref: codex/issue-730-cursor-checkpoint
+  destination_ref: main
+  base_sha: 3fa5828d1278f01f8108acd9892ee0a6ce104444
+  context_digest: sha256:8c413748212e71bf4f5cda62f87eb0378dd453334eea855d4d06b67a2ba5f26f
+approval:
+  approved_at: 2026-07-31T20:07:15.458Z
+  approved_by: local-user
