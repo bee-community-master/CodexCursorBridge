@@ -1,0 +1,368 @@
+id: TASK-FAMNEST-717-REPAIR-V2
+repository: famnest
+title: Repair durable atomic role-safe DecisionCard lifecycle and platform contracts on PR 782
+spec_version: 2
+goal: "Repair the preserved #717 implementation on draft PR #782 so DecisionCard records, responses,
+  receipts, materialization, deadlines, membership invalidation, strict undo, authorization,
+  idempotency, opaque pagination, and Web/iOS/Android clients are durable and complete rather than
+  in-memory or model-only behavior. Preserve exact Wave3 ancestry: checkpoint
+  7b3a80d77caa2f84d5aca3d94648471f39146e99 must remain descended from approved Wave3 base
+  7c3f7a7b82b8af1903d09a512906dc1c931c65c4 without rebasing, force-pushing, or importing an
+  unrelated Wave3 implementation."
+context_files:
+  - AGENTS.md
+  - docs/operations/build-contract.md
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - docs/engineering/backend-architecture.md
+  - docs/engineering/web-architecture.md
+  - docs/engineering/android-architecture.md
+  - docs/engineering/ios-architecture.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/decision-card-contract-v1.json
+  - services/backend/src/famnest_backend/api/v1/operations.py
+  - services/backend/src/famnest_backend/api/v1/tasks.py
+  - services/backend/src/famnest_backend/application/operations.py
+  - services/backend/src/famnest_backend/application/tasks.py
+  - services/backend/src/famnest_backend/application/dto/operation_decision_card_models.py
+  - services/backend/src/famnest_backend/application/dto/task_models.py
+  - services/backend/src/famnest_backend/application/ports/operation_decision_cards.py
+  - services/backend/src/famnest_backend/application/ports/operation_repository.py
+  - services/backend/src/famnest_backend/application/ports/task_mutations.py
+  - services/backend/src/famnest_backend/domain/operations/decision_card_policy.py
+  - services/backend/src/famnest_backend/repositories/operations_adapters.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_full_payload.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_load_operations.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_sync.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/operations/decision_card_lifecycle.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/operations/state.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/family/task_update_lifecycle.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/family/task_assignment_lifecycle.py
+  - services/backend/tests/test_operation_decision_card_contract.py
+  - services/backend/tests/test_operation_decision_card_policy.py
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - supabase/migrations/20260801090000_decision_cards.sql
+  - apps/web/src/lib/api/generated/schema.d.ts
+  - apps/web/src/lib/famnest/features/operations/decisionCardModels.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/operations/DecisionCardModels.kt
+  - apps/ios/Sources/FamNestIOSCore/API/APIDecisionCardModels.swift
+allowed_paths:
+  - docs/operations/build-contract.md
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/**
+  - services/backend/src/famnest_backend/api/v1/operations.py
+  - services/backend/src/famnest_backend/api/v1/tasks.py
+  - services/backend/src/famnest_backend/api/v1/internal_worker_ops.py
+  - services/backend/src/famnest_backend/api/v1/router.py
+  - services/backend/src/famnest_backend/api/dependencies.pyi
+  - services/backend/src/famnest_backend/api/dependency_modules/use_case_factories/operations.py
+  - services/backend/src/famnest_backend/api/dependency_modules/use_case_factories/public_worker.py
+  - services/backend/src/famnest_backend/application/operations.py
+  - services/backend/src/famnest_backend/application/tasks.py
+  - services/backend/src/famnest_backend/application/worker_ops.py
+  - services/backend/src/famnest_backend/application/dto/operation*.py
+  - services/backend/src/famnest_backend/application/dto/task*.py
+  - services/backend/src/famnest_backend/application/dto/worker*.py
+  - services/backend/src/famnest_backend/application/ports/operation*.py
+  - services/backend/src/famnest_backend/application/ports/task*.py
+  - services/backend/src/famnest_backend/application/ports/worker*.py
+  - services/backend/src/famnest_backend/domain/operations/**
+  - services/backend/src/famnest_backend/domain/tasks/**
+  - services/backend/src/famnest_backend/repositories/operations*.py
+  - services/backend/src/famnest_backend/repositories/task*.py
+  - services/backend/src/famnest_backend/repositories/postgres_operation*.py
+  - services/backend/src/famnest_backend/repositories/postgres_task*.py
+  - services/backend/src/famnest_backend/repositories/postgres_collection_policies.py
+  - services/backend/src/famnest_backend/repositories/postgres_domain_method_policies.py
+  - services/backend/src/famnest_backend/repositories/postgres_load_policies.py
+  - services/backend/src/famnest_backend/repositories/postgres_persist_policies.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_full_payload.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_load_operations.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_load_calendar.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_sync.py
+  - services/backend/src/famnest_backend/repositories/postgres_row_mappers.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/operations/**
+  - services/backend/src/famnest_backend/repositories/domain_runtime/task/**
+  - services/backend/src/famnest_backend/repositories/domain_runtime/family/task_*.py
+  - services/backend/tests/**decision_card**
+  - services/backend/tests/**operation**
+  - services/backend/tests/**task**
+  - services/backend/tests/**worker**
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - services/backend/tests/test_storage_privacy.py
+  - supabase/migrations/**
+  - apps/web/src/lib/api/client.ts
+  - apps/web/src/lib/api/generated/**
+  - apps/web/src/lib/famnest/famnestWebAdapters.ts
+  - apps/web/src/lib/famnest/features/operations/**
+  - apps/web/src/lib/famnest/features/tasks/**
+  - apps/web/src/routes/families/**
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/**
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOperationsApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestCalendarTaskApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/operations/**
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/tasks/**
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/operations/**
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/tasks/**
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/**
+  - apps/android/presentation/src/test/java/com/elevife/famnest/android/ui/**
+  - apps/android/src/main/java/com/elevife/famnest/android/FamNestAndroidUseCaseModule.kt
+  - apps/android/src/test/**
+  - apps/ios/Sources/FamNestIOSAPI/API/FamNestAPIClient+*.swift
+  - apps/ios/Sources/FamNestIOSCore/API/API*Decision*.swift
+  - apps/ios/Sources/FamNestIOSCore/API/API*Operation*.swift
+  - apps/ios/Sources/FamNestIOSCore/API/API*Task*.swift
+  - apps/ios/Sources/FamNestIOSCore/**
+  - apps/ios/Sources/FamNestIOSApp/AppShell/FamilyOperationSettings/**
+  - apps/ios/Sources/FamNestIOSApp/AppShell/CalendarTask/**
+  - apps/ios/Sources/FamNestIOSApp/Features/CalendarTask/**
+  - apps/ios/Sources/FamNestIOSApp/Features/Home/**
+  - apps/ios/Sources/FamNestIOSApp/Composition/**
+  - apps/ios/Tests/**
+  - apps/ios/FamNestIOSApp.xcodeproj/project.pbxproj
+forbidden_paths:
+  - .env
+  - .env.*
+  - "**/.env"
+  - "**/.env.*"
+  - "**/credentials/**"
+  - "**/secrets/**"
+  - artifacts/private/**
+  - scripts/release/**
+  - scripts/deploy/**
+  - deployment/**
+  - "**/deployment/**"
+  - infra/**
+  - "**/production/**"
+  - supabase/config.toml
+  - "**/google-services.json"
+  - "**/GoogleService-Info.plist"
+non_goals:
+  - Do not add an in-memory, process-local, access-triggered, model-only, audit-only, or
+    string-presence substitute for durable DecisionCard behavior, PostgreSQL verification, a due
+    worker, authoritative authorization, generated clients, or canonical FamilyTask creation.
+  - Do not add AI auto-selection or auto-response, anonymous or weighted voting, chat, generic
+    surveys, or automatic payment, external message, calendar write, assignee change, medical
+    action, or protected effect from a child response.
+  - Do not treat DecisionCard response as
+  - Do not expose exact amounts, other deciders' choices, sensitive option text, identifiers,
+    provider data, or destination data through child/non-parent projections, cursor tokens,
+    idempotency records, errors, telemetry, notifications, or opaque push payloads.
+  - Do not claim production migration, scheduler, notification delivery, provider behavior,
+    device/store readiness, or product impact from repository-local evidence.
+acceptance_criteria:
+  - Persistence and the transaction boundary are real. Decision cards, responses, immutable
+    receipts, materialization links/fingerprints, approval links, audit, activity receipts,
+    Operation revisions, and idempotency outcomes are represented in normalized durable PostgreSQL
+    state, included in full-payload/load/persist/sync policies, and restored after process restart.
+    The final qualifying response, quorum evaluation, protected-effect gate, canonical task or
+    handoff creation, Operation link/next action, decision revision, Operation revision and
+    plan_revision, audit, activity receipt, and opaque outbox event commit through one repository
+    unit-of-work transaction. Concurrent requests and restart/retry converge to one response and one
+    byte-equivalent receipt with no duplicate resource, link, audit, or notification.
+  - Every mutation validates authorization, accepted/active membership, Operation/resource ACL,
+    visible deciders and affected members/children, idempotency fingerprint, decision and Operation
+    expected revisions, deadline/grace eligibility, option/effect preview, and materialization
+    safety before mutating state. A resolution-blocked or stale request may preserve only the final
+    response when the fixed contract explicitly permits it; it creates no task, handoff, approval,
+    Operation link, audit side effect, or partial resource. Every other 4xx or 5xx path, including a
+    post-grace or invalid update, leaves durable readback byte-for-byte equivalent to pre-request
+    state. Tests inject failures at each transaction stage and prove complete rollback.
+  - Authorization and RLS are least privilege. Card reads require accepted membership plus the
+    owning Operation ACL. Response choice reads are self-or-parent-audit only; ordinary in-progress
+    projections expose presence only, and resolved ACL-safe projections expose selected option plus
+    aggregate counts. A member may mutate only their own active response through authorized service
+    APIs; receipt and materialization tables are server-write-only and readable only through
+    authorized projections, and membership is enforced on every relation. Freshly migrated
+    PostgreSQL API/RLS tests cover parent, creator, decider, child, caregiver/grandparent child
+    scope, accepted and pending members, unrelated accepted members outside the Operation ACL,
+    inactive/left members, and cross-family users for direct SELECT/INSERT/UPDATE/DELETE attempts.
+  - Idempotent replay never returns a raw stored card or privileged receipt. The server either
+    stores an actor/role-safe response or recomputes projection under current membership and ACL
+    without broadening visibility. First response and replay are byte-equivalent for the same actor
+    and role, while parent, non-parent, child, and unauthorized replays observe their exact
+    projection; a child replay cannot reveal an exact currency amount or another decider's choice.
+  - "Strict undo is revisioned and indefinite, not #730's 24-hour undo. At materialization the
+    server stores immutable per-resource fingerprints covering canonical #718 revision,
+    title/summary, status/completion, executor/owner/helper/beneficiary assignment, deadline/window,
+    handoff, external-send state, dependency and follow-up links, origin/source lineage, and every
+    other human-editable or externally observable field. Undo rereads every resource and Operation
+    link, requires expected Decision and Operation revision plus plan_revision, and atomically
+    rejects missing, edited, completed, reassigned, transmitted, or dependent resources with a typed
+    manual recovery preview and zero deletion. Success removes every resource and Operation link,
+    advances Operation revisions consistently, restores the same decision revision to its response
+    state, and preserves original receipt and audit."
+  - "`_visible_operation_member_ids` and equivalent placeholders are removed. Creation, update,
+    response, cancel, reopen, deadline extension, resolve, and undo derive visibility from the real
+    owning Operation/resource ACL and current accepted membership. Non-parent creators include
+    themselves and may add only visible members; affected members and children are same-family,
+    accepted/active where applicable, and child-scope visible. Membership loss or ACL revocation is
+    delivered by real membership/resource lifecycle hooks, invalidates only the member's active
+    response with one immutable reasoned audit event, preserves the roster denominator, and never
+    reverses an already resolved decision."
+  - Deadlines store local date, local time, IANA timezone, and immutable resolved UTC instant; gaps
+    and folds return 422. A durable fenced due-worker claims deadline, exactly-24-hour grace close,
+    once-only reminder, and parent-review work with lease, retry, restart, and concurrent-worker
+    safety. `remind_once` waits through configured quiet hours and emits one opaque notification;
+    `escalate_to_parent_review` creates only one durable review item and no decision/effect
+    mutation; `no_change` mutates no product resource. New or replacement responses are accepted
+    only during the exact grace interval, and parent deadline extension preserves valid responses.
+  - Response projection selects the current active response first and otherwise the newest terminal
+    response for that decision revision; replacing option A with B cannot project the earlier
+    withdrawn A. Replace, withdraw, membership invalidation, revision reset, final-response resolve,
+    blocked resolve, reopen, and role-safe list/get/replay tests assert exact response order, state,
+    choice visibility, aggregate counts, and receipt.
+  - "List pagination implements the #768 opaque cursor contract with deterministic stable ordering,
+    snapshot-safe continuation, bounded limit, malformed/tampered/cross-family cursor rejection, no
+    duplicate or skipped card across pages, and content-free tokens. It does not ignore the cursor,
+    repeatedly return page one, or always return null. OpenAPI is canonical and regenerated; Web
+    uses generated request/response/status types and a real API repository/use case/UI flow, Android
+    wires generated-derived DTO/path, transport, repository, use case, DI, ViewModel and accessible
+    Compose flow, and iOS wires API client, DTOs, gateway, composition, navigation and accessible
+    SwiftUI flow. All create/list/get/update/respond/withdraw/cancel/reopen/undo requests, role-safe
+    projections, receipts, cursors, 422/403/409 errors, offline read-only states, and opaque push
+    fixtures conform across all three platforms."
+  - "Materialization consumes the canonical #718 FamilyTask v2 and handoff creation port, DTO,
+    transaction, role/ACL validation, immutable origin_lineage, representative_origin, revisions,
+    assignment, deadline/window, readiness, and idempotency behavior at the #718 final-head
+    contract. It never constructs the legacy FamilyTask model directly, never invents a random
+    source UUID, and preserves DecisionCard ID plus decision revision and option/effect source
+    lineage. If the exact #718 final-head contract is unavailable or incompatible in PR #782's
+    ancestry, stop with concrete dependency evidence instead of synthesizing a parallel task or
+    silently copying another issue's implementation."
+  - "The full issue contract remains intact: deterministic single_decider, unanimous, strict
+    majority, tie and plurality behavior; response privacy; child protected-effect parent approval;
+    resolved status separate from materialization state; revision reset; cancel/reopen; exact cost
+    redaction; resolution_blocked; Operation next action; audit/retention; and content-free #754
+    push are all covered by non-tautological tests. The preserved PR remains descended from exact
+    Wave3 base 7c3f7a7b82b8af1903d09a512906dc1c931c65c4 and contains no unrelated Wave3 issue."
+  - Ruff reports zero findings for every changed Python file, migrations are actually applied to a
+    fresh PostgreSQL database rather than checked by SQL string presence, and focused unit/API,
+    concurrency/restart, migrated-PostgreSQL/RLS, OpenAPI generation, Web, Android, iOS, migration,
+    and complete repository gates all pass on the final tree. Tests assert durable rows,
+    transactions, ACL projections, exact bytes, cursor continuity, worker fencing, real canonical
+    resource effects, and restart behavior rather than mocks or status-only simulations.
+implementation_constraints:
+  - "Begin from open draft PR #782 at exact checkpoint 7b3a80d77caa2f84d5aca3d94648471f39146e99;
+    stop if its head moved, it is not open/draft, its destination is not main, or its merge-base
+    with main is not exact Wave3 base 7c3f7a7b82b8af1903d09a512906dc1c931c65c4."
+  - "Preserve justified checkpoint work and repair forward on the existing branch. Do not delete
+    tests merely to pass gates, rebase, force-push, discard the checkpoint, or import unrelated
+    Wave3 commits. A canonical #718 dependency may be integrated only through its approved
+    final-head contract and ancestry plan; stop rather than hand-copy or fork its authority."
+  - Use the canonical PostgreSQL unit-of-work, repository load/persist/sync policy, operation ACL,
+    membership lifecycle, due-worker, outbox, generated-client, API dependency-injection, and
+    FamilyTask v2 ports. Do not introduce a parallel transaction manager, polling-only deadline
+    authority, client-trusting ACL, bespoke task ledger, raw projection cache, or second
+    idempotency/retention policy.
+  - Validation is side-effect-free and occurs before acquiring a write transaction where possible;
+    final CAS revalidation occurs inside the transaction. Persist deterministic fingerprints,
+    receipt keys, worker claim keys, cursor ordering keys, and source lineage explicitly. Keep
+    audit, errors, cursors, push, notifications, metrics, and traces bounded and content-free.
+verification:
+  commands:
+    - command: uv
+      args:
+        - run
+        - ruff
+        - check
+        - services
+        - packages
+        - scripts
+      timeout_seconds: 1200
+    - command: pnpm
+      args:
+        - run
+        - verify:python:fast
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:openapi:full
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1200
+    - command: pnpm
+      args:
+        - run
+        - test:backend:db-smoke
+      env:
+        UV_CACHE_DIR: .uv-cache
+        FAMNEST_BACKEND_DB_SMOKE_APPLY_MIGRATIONS: "1"
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:migrations
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 900
+    - command: pnpm
+      args:
+        - run
+        - verify:all
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 3600
+  profile_hash: sha256:e8132401f7ea576f64d8758f43f9f32b748d0f6074336a444ae8db041efb5a98
+required_new_tests:
+  - "Add migrated-PostgreSQL unit-of-work tests for all four durable ledgers and Operation linkage:
+    final-response commit, every injected failure stage, stale decision/Operation revisions, blocked
+    resolve, exact replay, process restart, and simultaneous first-response/replay. Assert
+    byte-equivalent pre/post state for every 4xx/5xx except the explicitly preserved blocked final
+    response, plus exactly-one receipt/resource/audit/outbox after successful retry."
+  - Add fresh-migration direct-SQL and real-API authorization/RLS matrices for parent, creator,
+    decider, child, caregiver/grandparent scope, accepted/pending/inactive/left members, unrelated
+    accepted member outside the Operation ACL, and cross-family actor across card, response,
+    receipt, materialization, approval-link, audit, and idempotency relations. Add
+    first-versus-replay byte and redaction assertions for every role.
+  - Add strict-undo regression tests that edit each fingerprinted FamilyTask v2/handoff and
+    Operation field independently, including title, assignment, revision, completion, transmission,
+    dependency and follow-up; each must yield a complete manual-recovery preview and zero partial
+    deletion. Add successful all-resource undo with links/revisions/receipt/audit preservation and
+    concurrent undo fencing.
+  - Add real membership/ACL lifecycle-hook and durable due-worker tests for response invalidation,
+    roster-denominator preservation, quiet-hours delay, once-only reminder, exact deadline and
+    24-hour grace boundaries, parent extension, mutation-free review escalation, overlapping worker
+    claims, crash before/after commit, lease expiry, restart, and replay.
+  - "Add response ordering and #768 cursor tests, then regenerate OpenAPI and add Web/Android/iOS
+    generated-contract plus real repository/use-case/DI/navigation/UI tests for every endpoint,
+    projection, receipt, error, offline state, accessibility behavior, and content-free opaque push.
+    Add integration tests proving Decision materialization invokes the canonical #718 final-head
+    FamilyTask v2/handoff port once with exact Decision revision and source lineage."
+limits:
+  max_changed_files: 500
+  max_diff_lines: 100000
+  allow_test_deletion: false
+  max_repair_attempts: 2
+stop_conditions:
+  - "Draft PR #782 is closed, non-draft, moved from checkpoint
+    7b3a80d77caa2f84d5aca3d94648471f39146e99 before dispatch, targets a branch other than main, or
+    no longer has exact Wave3 base 7c3f7a7b82b8af1903d09a512906dc1c931c65c4 as its merge-base."
+  - "The approved #718 final-head canonical FamilyTask v2/handoff contract is unavailable or cannot
+    be consumed without rebasing, force-pushing, copying its implementation, changing its owned
+    contract, or creating a parallel task authority."
+  - A requested behavior requires credentials, production deployment, a live provider/notification
+    service, production database mutation, store submission, or device-only evidence.
+  - "Any repair would weaken accepted-membership, Operation/resource ACL, child scope, response
+    privacy, exact-amount redaction, RLS, revision/CAS, idempotency, atomicity, undo safety, worker
+    fencing, opaque push/cursor, immutable audit, or #768 retention."
+pull_request:
+  mode: existing_pr
+  number: 782
+status: approved
+spec_hash: sha256:e9f5943b24a90641be10e520187e19605161e96db980abe9c6d738add98861bd
+policy_version: 3
+target:
+  origin: HearingOffice/elevife-famnest
+  base_ref: codex/issue-717-cursor-checkpoint
+  destination_ref: main
+  base_sha: 7b3a80d77caa2f84d5aca3d94648471f39146e99
+  context_digest: sha256:bdc1326f479bf0554d95b79534d1e53d9ca5d232e1702aa4e78aaeb25369160e
+approval:
+  approved_at: 2026-07-31T22:14:38.599Z
+  approved_by: local-user
