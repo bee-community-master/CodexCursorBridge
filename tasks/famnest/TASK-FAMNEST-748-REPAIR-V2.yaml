@@ -1,0 +1,345 @@
+id: TASK-FAMNEST-748-REPAIR-V2
+repository: famnest
+title: Repair shared-image document runtime persistence security and generated contracts on PR 780
+spec_version: 2
+goal: "Repair the preserved #748 implementation on draft PR #780 so the shared-image document
+  contract is connected to production runtime contexts, durable PostgreSQL state, restrictive RLS,
+  page-scoped OCR and credit orchestration, backward-compatible multi-attachment ingestion, common
+  staging coordination, and generated Web/Android/iOS contracts. Preserve exact Wave3 ancestry:
+  checkpoint e06fc388ca618bd35a60c8cae1d4c80d04accf65 must descend from approved base
+  7c3f7a7b82b8af1903d09a512906dc1c931c65c4 without rebasing or importing another issue."
+context_files:
+  - AGENTS.md
+  - docs/operations/build-contract.md
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - docs/engineering/backend-architecture.md
+  - docs/engineering/web-architecture.md
+  - docs/engineering/android-architecture.md
+  - docs/engineering/ios-architecture.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/shared-image-document-contract-v1.json
+  - services/backend/src/famnest_backend/api/v1/input_items.py
+  - services/backend/src/famnest_backend/api/v1/uploads.py
+  - services/backend/src/famnest_backend/application/ai_shared_image_document.py
+  - services/backend/src/famnest_backend/application/input_ingestion/shared_image_documents.py
+  - services/backend/src/famnest_backend/application/ports/input_shared_image_documents.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/contexts.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/input/shared_image_document_lifecycle.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_load_input.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_load_ai.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_sync.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/email/attachment_records.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/email/attachment_lifecycle.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/source/url_asset_records.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/source/url_asset_storage_writer.py
+  - services/backend/src/famnest_backend/rls.py
+  - services/backend/tests/test_shared_image_ai_credits.py
+  - services/backend/tests/test_shared_image_document_domain.py
+  - services/backend/tests/test_shared_image_document_staging.py
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - supabase/migrations/20260801090000_shared_image_documents.sql
+  - apps/web/src/lib/api/generated/schema.d.ts
+  - apps/web/src/lib/api/client.test.ts
+  - apps/web/src/lib/famnest/features/input/inputApiRepository.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestInputApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestInputApiPaths.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOpenApiDerivedPathContracts.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/FamNestApiPathsTest.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/V15CommonOpenApiContractTest.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/input/InputCaptureApiTest.kt
+  - apps/ios/Sources/FamNestIOSAPI/API/FamNestAPIClient+InputCapture.swift
+  - apps/ios/Sources/FamNestIOSCore/API/APIInputCaptureModels.swift
+  - apps/ios/Tests/FamNestIOSAPITests/FamNestAPIClientInputCaptureTests.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/OpenAPIEndpointPresenceContractTests.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/OpenAPIInputCaptureDTOPropertyContractTests.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/OpenAPISchemaContractDocument.swift
+allowed_paths:
+  - docs/operations/build-contract.md
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/**
+  - services/backend/src/famnest_backend/api/v1/input_items.py
+  - services/backend/src/famnest_backend/api/v1/uploads.py
+  - services/backend/src/famnest_backend/api/v1/candidate_packages.py
+  - services/backend/src/famnest_backend/application/input_ingestion/**
+  - services/backend/src/famnest_backend/application/input_ingestion_permissions.py
+  - services/backend/src/famnest_backend/application/ai_*.py
+  - services/backend/src/famnest_backend/application/candidate_approval*.py
+  - services/backend/src/famnest_backend/application/dto/input*.py
+  - services/backend/src/famnest_backend/application/dto/ai_*.py
+  - services/backend/src/famnest_backend/application/ports/input*.py
+  - services/backend/src/famnest_backend/application/ports/ai_*.py
+  - services/backend/src/famnest_backend/domain/input_*.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/input/**
+  - services/backend/src/famnest_backend/repositories/domain_runtime/ai/**
+  - services/backend/src/famnest_backend/repositories/postgres_input*.py
+  - services/backend/src/famnest_backend/repositories/postgres_ai*.py
+  - services/backend/src/famnest_backend/repositories/input*.py
+  - services/backend/src/famnest_backend/services/input_extraction*.py
+  - services/backend/src/famnest_backend/services/ai_*.py
+  - services/backend/src/famnest_backend/rls.py
+  - services/backend/tests/**input**
+  - services/backend/tests/**upload**
+  - services/backend/tests/**source**
+  - services/backend/tests/**ai_stage**
+  - services/backend/tests/**candidate**
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - supabase/migrations/**
+  - apps/web/src/lib/api/generated/**
+  - apps/web/src/lib/famnest/features/input/**
+  - apps/web/src/lib/famnest/shared/uploadMime.*
+  - apps/web/src/routes/families/**/input-progress/**
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestInputApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestInputApiPaths.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/input/**
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/input/**
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/port/InputCapture*.kt
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/usecase/Input*.kt
+  - apps/android/platform/src/main/java/com/elevife/famnest/android/platform/input/AndroidInputSourceLimits.kt
+  - apps/android/platform/src/main/java/com/elevife/famnest/android/platform/input/AndroidInputContentMetadata.kt
+  - apps/android/platform/src/main/java/com/elevife/famnest/android/platform/input/AndroidSharedInputDraftParser.kt
+  - apps/android/platform/src/test/java/com/elevife/famnest/android/platform/input/**
+  - apps/ios/Sources/FamNestIOSCore/API/APIInputCapture*.swift
+  - apps/ios/Sources/FamNestIOSCore/**
+  - apps/ios/Sources/FamNestIOSApp/AppShell/InputCapture/Share/**
+  - apps/ios/Sources/FamNestIOSApp/Features/InputCapture/Share/**
+  - apps/ios/Tests/**
+  - services/backend/src/famnest_backend/api/v1/router.py
+  - services/backend/src/famnest_backend/repositories/postgres_row_mappers.py
+  - services/backend/tests/test_shared_image_ai_credits.py
+  - services/backend/tests/test_shared_image_document_domain.py
+  - services/backend/tests/test_shared_image_document_staging.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/contexts.py
+  - services/backend/src/famnest_backend/repositories/postgres_collection_policies.py
+  - services/backend/src/famnest_backend/repositories/postgres_domain_method_policies.py
+  - services/backend/src/famnest_backend/repositories/postgres_load_policies.py
+  - services/backend/src/famnest_backend/repositories/postgres_persist_policies.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_load_input.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_load_ai.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_sync.py
+  - services/backend/src/famnest_backend/application/dto/product_interactions.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/email/attachment_records.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/email/attachment_lifecycle.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/source/url_asset_records.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/source/url_asset_storage_writer.py
+  - apps/web/src/lib/api/client.test.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOpenApiDerivedPathContracts.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/FamNestApiPathsTest.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/V15CommonOpenApiContractTest.kt
+  - apps/ios/Sources/FamNestIOSAPI/API/FamNestAPIClient+InputCapture.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/OpenAPIEndpointPresenceContractTests.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/OpenAPIInputCaptureDTOPropertyContractTests.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/OpenAPISchemaContractDocument.swift
+forbidden_paths:
+  - .env
+  - .env.*
+  - "**/.env"
+  - "**/.env.*"
+  - "**/credentials/**"
+  - "**/secrets/**"
+  - artifacts/private/**
+  - scripts/release/**
+  - scripts/deploy/**
+  - deployment/**
+  - "**/deployment/**"
+  - infra/**
+  - "**/production/**"
+  - supabase/config.toml
+  - "**/google-services.json"
+  - "**/GoogleService-Info.plist"
+non_goals:
+  - Do not implement the iOS Share Extension or Android intent ingress lifecycle owned by issues 749
+    and 750; this repair owns only the shared generated contract and conformance surfaces.
+  - Do not replace the existing generic file_upload source type, break legacy single-upload or
+    multi-attachment email/URL records, or add a general source type, crawler, or photo watcher.
+  - Do not add an in-memory-only outbox, revocation audit, staging authority, OCR barrier, credit
+    ledger substitute, or status-only simulation in place of production runtime and PostgreSQL
+    wiring.
+  - Do not weaken active membership, child scope, submitted-account ownership, object ownership,
+    parent-only approval, candidate warning acknowledgement, RLS, idempotency, or retention.
+  - Do not store raw bytes, URI, filename, source app, client item ID,
+    family/member/child/input/source IDs in telemetry, crash reports, deep links, or push payloads.
+  - Do not claim production provider, bucket, notification, migration, device, or store readiness
+    from repository-local evidence.
+acceptance_criteria:
+  - Runtime and API integration are real. Canonical repository contexts carry
+    family_child_profile_ids through construction, load, mutation, and persistence, and all fourteen
+    shared-image API integration cases pass without the five current 500 responses. Intent,
+    complete, refresh, finalize, read, candidate warning acknowledgement, and approval use the same
+    authoritative production repository and transaction paths rather than a test-only context.
+  - AI orchestration fans out actual OCR work per accepted image or synthesized-PDF page with
+    immutable ordinal and source/page-scoped retries. A durable terminal barrier waits for every OCR
+    unit, ordered fan-in uses successful extraction by ordinal, all-failure creates no candidate and
+    remains retryable, partial failure records missing ordinals and requires parent warning
+    acknowledgement, and successful fan-in invokes the LLM and candidate creation exactly once. OCR
+    reserve/settle/release and downstream LLM reserve use stable logical/stage/ordinal keys; crash,
+    replay, partial failure, and insufficient-credit resume cannot duplicate ledger events or calls.
+  - AI dispatch outbox records and sensitive-input owner-revocation audits are durable PostgreSQL
+    state with complete collection, row mapping, load, persist, state-sync, and restart behavior.
+    Transactional unique keys make finalize replay, worker crash recovery, restart, revocation
+    replay, and parent notification creation converge exactly once without losing immutable actor,
+    reason, input, affected member, or timestamp audit fields.
+  - RLS and application authorization are restrictive rather than a permissive OR layered on legacy
+    same-family access. Freshly migrated PostgreSQL tests prove active membership, submitted account
+    and object ownership, parent and candidate-owner reads, leave/suspend/delete/account deletion
+    revocation, parent sensitive-input revocation, cross-family rejection, and caregiver or
+    grandparent child-scope enforcement. The OS-share submitter read exception is limited to active
+    owners of their own submitted originals and candidate; approval remains parent-only.
+  - Source ordinals are immutable and collision-safe across ingestion surfaces. Shared-image input
+    uniqueness and backfill do not apply a global default ordinal zero that breaks existing email or
+    URL multi-attachment records. Existing generic single upload and email/URL batches with two or
+    more attachments retain stable distinct ordinals across create, load, persist, retry, migration,
+    restart, and cleanup while shared-image duplicate SHA handling deterministically preserves the
+    canonical source and cleans or revokes the duplicate object without orphaned rows or bytes.
+  - The common staging coordinator implements the fixture state machine staging, staged, claimed,
+    uploading, awaiting_user_choice or ready_to_finalize, and finalized, cancelled, or expired.
+    Claims are atomic single-consume operations; bundles have a 24-hour expiry and idempotent
+    cancel, expiry, logout, and account-change cleanup; 1-second and 3-second retry scheduling
+    preserves the bundle until the user chooses retry or successful-subset finalize. Limits reject a
+    new bundle without deleting existing ones, and crash/restart cannot duplicate claim, upload,
+    finalize, or cleanup effects.
+  - "Complete-upload idempotency is bound to the full validated payload including byte size, MIME,
+    SHA-256, source/input ownership, and object identity: exact replay succeeds, any changed payload
+    conflicts, and only one verified canonical source remains. Accepted ordinals, source metadata,
+    accepted set/order, finalize outbox, warning acknowledgement, and finalized state are immutable
+    after their contract boundary."
+  - The four shared-image endpoints and exhaustive request, response, status, idempotency, revision,
+    role-safe credit, privacy, signed-URL, staging, and error shapes are present in OpenAPI and the
+    generated Web schema, Android path/DTO contracts, iOS API client/DTO contracts, and platform
+    conformance fixtures. Main-app telemetry records only received, presented, submitted, and
+    candidate_ready with source_surface=os_share and opaque identifiers; extension/receiver emits no
+    event and notifications stay in-app and content-free. Existing single upload and email/URL
+    multi-attachment flows remain backward compatible.
+  - The preserved PR remains descended from exact Wave3 base
+    7c3f7a7b82b8af1903d09a512906dc1c931c65c4 and contains no unrelated Wave3 issue. Ruff, all
+    fourteen focused API integration tests, AI/domain/staging tests, generated OpenAPI and platform
+    contract checks, migrated PostgreSQL and RLS coverage, migrations, and full repository
+    verification pass on the final tree with exact non-tautological assertions and failure
+    visibility.
+implementation_constraints:
+  - "Begin from open draft PR #780 at exact checkpoint e06fc388ca618bd35a60c8cae1d4c80d04accf65;
+    stop if its head moved, it is non-draft or closed, or its merge-base with main is not exact
+    Wave3 base 7c3f7a7b82b8af1903d09a512906dc1c931c65c4."
+  - "The prior STALE_SPEC was a configuration-fingerprint false positive, not a content or ancestry
+    mismatch. PR #780 intentionally preserves the exact prepared-worktree checkpoint. Retain that
+    checkpoint and repair forward on its branch under this freshly approved v2 context/hash; do not
+    discard, reconstruct, rebase, force-push, or import another issue."
+  - Preserve all justified v1 implementation and integration paths, including its five previously
+    out-of-allowlist files, while repairing behavior and tests. Do not delete tests merely to pass
+    gates.
+  - Reuse canonical repository contexts, PostgreSQL load/persist/sync policies, AI job and credit
+    ports, source lifecycles, generated-client workflows, product-interaction DTOs, and transaction
+    boundaries; no parallel authority or request-trusting shortcut is allowed.
+  - Keep source ordinals, accepted sets, idempotency payload fingerprints, audit provenance, and
+    ledger/outbox keys explicit and immutable. Audit, notification, telemetry, and crash payloads
+    remain content-free and role-safe.
+verification:
+  commands:
+    - command: uv
+      args:
+        - run
+        - ruff
+        - check
+        - services
+        - packages
+        - scripts
+      timeout_seconds: 1200
+    - command: pnpm
+      args:
+        - run
+        - verify:python:fast
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:openapi:full
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1200
+    - command: pnpm
+      args:
+        - run
+        - test:backend:db-smoke
+      env:
+        UV_CACHE_DIR: .uv-cache
+        FAMNEST_BACKEND_DB_SMOKE_APPLY_MIGRATIONS: "1"
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:migrations
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 900
+    - command: pnpm
+      args:
+        - run
+        - verify:all
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 3600
+  profile_hash: sha256:e8132401f7ea576f64d8758f43f9f32b748d0f6074336a444ae8db041efb5a98
+required_new_tests:
+  - Add production API/repository integration coverage for all fourteen shared-image cases,
+    including family_child_profile_ids context construction, intent/complete/refresh/finalize/read,
+    exact-payload replay versus conflict, duplicate-SHA cleanup, immutable ordinal/set/order, and
+    warning acknowledgement before parent approval.
+  - Add actual OCR page/source fan-out, terminal barrier, ordered fan-in, partial and all-failure,
+    LLM exactly-once, reserve/settle/release, insufficient-credit resume, crash-before/after commit,
+    replay, restart, stable key, and no-duplicate ledger/outbox/candidate/notification tests.
+  - Add freshly migrated PostgreSQL and RLS tests for outbox and revocation-audit load/persist/sync,
+    restart dedupe, active owner and parent reads, parent-only approval, caregiver child scope,
+    cross-family and other-account rejection, and immediate leave/suspend/delete/account-deletion or
+    explicit parent-revocation denial.
+  - Add regression tests proving generic single upload and existing email/URL batches with two or
+    more attachments retain immutable collision-free ordinals across migration, persistence, retry,
+    restart, and cleanup, while shared-image canonical duplicate SHA rows and objects converge
+    safely.
+  - Add staging coordinator tests for limits, staged/claimed atomic single-consume, 24-hour expiry,
+    1-second and 3-second retry, explicit retry-versus-successful-subset choice,
+    cancel/expiry/logout/ account-change cleanup, restart recovery, and no implicit bundle deletion.
+  - Regenerate OpenAPI and add Web generated-schema, Android derived-path/DTO, iOS client/DTO, and
+    cross-platform fixture conformance tests for both representations, exhaustive role-safe status
+    and errors, payload-bound idempotency, signed URL expiry, staging, privacy, os_share main-app
+    telemetry, opaque notifications, and backward-compatible single upload plus email/URL
+    two-or-more attachment flows.
+  - Run Ruff, the fourteen focused API integration cases, migrated DB/RLS tests, OpenAPI full
+    verification, migration verification, and full repository gates. Repair the eight current Ruff
+    errors and five current API failures; assertions must prove actual call counts, rows,
+    transitions, objects, role filtering, retries, cleanup, generated artifacts, and final failure
+    visibility.
+limits:
+  max_changed_files: 500
+  max_diff_lines: 100000
+  allow_test_deletion: false
+  max_repair_attempts: 2
+stop_conditions:
+  - "Draft PR #780 is closed, non-draft, moved from checkpoint
+    e06fc388ca618bd35a60c8cae1d4c80d04accf65 before dispatch, or no longer has exact Wave3 base
+    7c3f7a7b82b8af1903d09a512906dc1c931c65c4 as its merge-base."
+  - A requested native ingress lifecycle belongs to issues 749 or 750 rather than the shared common
+    contract, generated client, fixture, or main-app telemetry owned by issue 748.
+  - A requested behavior requires credentials, production deployment, live storage/provider/
+    notification service, production database mutation, store submission, or device-only evidence.
+  - Any repair would weaken validation, ownership, active membership, child scope, RLS, parent-only
+    approval, warning acknowledgement, idempotency, credit accounting, immutable audit, privacy,
+    cleanup, or retention.
+pull_request:
+  mode: existing_pr
+  number: 780
+status: approved
+spec_hash: sha256:ea7a052913ea65309f9c81722129d9c688f8466489bae96fd9ee852d8ccd4142
+policy_version: 3
+target:
+  origin: HearingOffice/elevife-famnest
+  base_ref: codex/issue-748-cursor-checkpoint
+  destination_ref: main
+  base_sha: e06fc388ca618bd35a60c8cae1d4c80d04accf65
+  context_digest: sha256:07928d41ea4b7abfe474fd310ac6476776a60c14abe612e4f376cc5368f1a650
+approval:
+  approved_at: 2026-07-31T20:45:27.751Z
+  approved_by: local-user
