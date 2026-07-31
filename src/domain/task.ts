@@ -50,6 +50,7 @@ const safeVerificationEnv = z.record(z.string().regex(/^[A-Z][A-Z0-9_]*$/), z.st
     }
     const reservedNames = Object.keys(env).filter((name) =>
       reservedVerificationEnvironment.has(name)
+      || /^COREPACK_/.test(name)
       || /^(?:DYLD|LD)_/.test(name),
     );
     if (reservedNames.length > 0) {

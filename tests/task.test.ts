@@ -240,6 +240,8 @@ describe("task contract", () => {
     "CI",
     "LANG",
     "COREPACK_HOME",
+    "COREPACK_ROOT",
+    "COREPACK_CUSTOM_FLAG",
     "COREPACK_DEFAULT_TO_LATEST",
     "DYLD_INSERT_LIBRARIES",
     "LD_PRELOAD",

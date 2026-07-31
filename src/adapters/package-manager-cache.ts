@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { cp, chmod, lstat, mkdir, readFile, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,15 +12,21 @@ export interface PackageManagerSpec {
 
 export interface StagedPackageManager {
   name: PackageManagerSpec["name"];
+  binary: "pnpm" | "pnpx";
   version: string;
   digest: string;
+  integrity?: string;
+  artifactDigest: string;
   corepackHome: string;
+  executable: string;
+  entrypoint: string;
   source: "verifier-owned-corepack-cache";
   network: "denied";
 }
 
 interface CorepackMetadata {
   locator?: { name?: string; reference?: string };
+  bin?: Record<string, unknown>;
   hash?: string;
 }
 
@@ -52,9 +59,17 @@ export async function readPackageManager(worktree: string): Promise<PackageManag
     throw new Error("Independent verifier requires an exact packageManager declaration");
   }
   const match = /^(pnpm)@([^\s]+)$/.exec(declaration);
-  const version = match?.[2] ? parseExactVersion(match[2]) : undefined;
-  const integrity = match?.[2]?.split("+", 2)[1];
-  if (!match || !version || (integrity && !/^sha512\.[a-f0-9]+$/i.test(integrity))) {
+  const referenceParts = match?.[2]?.split("+") ?? [];
+  const version = referenceParts.length > 0
+    ? parseExactVersion(referenceParts[0] ?? "")
+    : undefined;
+  const integrity = referenceParts.length === 2 ? referenceParts[1] : undefined;
+  if (
+    !match
+    || referenceParts.length > 2
+    || !version
+    || (integrity !== undefined && !/^sha512\.[a-f0-9]+$/i.test(integrity))
+  ) {
     throw new Error("Independent verifier supports only an exact pnpm packageManager declaration");
   }
   return {
@@ -74,6 +89,12 @@ function defaultCorepackHome(): string {
 
 function packageDirectory(corepackHome: string, spec: PackageManagerSpec): string {
   return path.join(corepackHome, "v1", spec.name, spec.version);
+}
+
+interface ValidatedPackageManager {
+  digest: string;
+  executable: string;
+  entrypoint: string;
 }
 
 async function isDirectory(candidate: string): Promise<boolean> {
@@ -102,7 +123,8 @@ async function copyReadOnlyCache(
 async function assertPackageManagerCache(
   corepackHome: string,
   spec: PackageManagerSpec,
-): Promise<string> {
+  binary: "pnpm" | "pnpx",
+): Promise<ValidatedPackageManager> {
   const directory = packageDirectory(corepackHome, spec);
   try {
     const metadata = JSON.parse(
@@ -122,11 +144,58 @@ async function assertPackageManagerCache(
     ) {
       throw packageManagerError(spec.version, "the staged package failed integrity checks");
     }
-    return metadata.hash;
+    const rawEntrypoint = metadata.bin?.[binary];
+    if (typeof rawEntrypoint !== "string") {
+      throw packageManagerError(spec.version, `the staged package has no ${binary} entrypoint`);
+    }
+    const executable = path.resolve(directory, rawEntrypoint);
+    const relativeEntrypoint = path.relative(directory, executable);
+    if (
+      !relativeEntrypoint
+      || relativeEntrypoint === ".."
+      || relativeEntrypoint.startsWith(`..${path.sep}`)
+      || path.isAbsolute(relativeEntrypoint)
+    ) {
+      throw packageManagerError(spec.version, "the staged package entrypoint escapes its artifact");
+    }
+    const entrypointMetadata = await lstat(executable);
+    if (!entrypointMetadata.isFile() || entrypointMetadata.isSymbolicLink()) {
+      throw packageManagerError(spec.version, "the staged package entrypoint is not a plain file");
+    }
+    return {
+      digest: metadata.hash,
+      executable,
+      entrypoint: relativeEntrypoint.split(path.sep).join("/"),
+    };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Independent verifier")) throw error;
     throw packageManagerError(spec.version, "the staged package failed integrity checks");
   }
+}
+
+async function artifactDigest(root: string, relative = ""): Promise<string> {
+  const hash = createHash("sha256");
+  const entries = await readdir(path.join(root, relative), { withFileTypes: true });
+  for (const entry of entries.sort((left, right) =>
+    left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+  )) {
+    const childRelative = relative ? path.join(relative, entry.name) : entry.name;
+    const child = path.join(root, childRelative);
+    if (entry.isSymbolicLink()) {
+      throw new Error("Independent verifier package cache may not contain symbolic links");
+    }
+    if (entry.isDirectory()) {
+      hash.update(`directory\0${childRelative}\0`);
+      hash.update(await artifactDigest(child, ""));
+    } else if (entry.isFile()) {
+      hash.update(`file\0${childRelative}\0`);
+      hash.update(await readFile(child));
+      hash.update("\0");
+    } else {
+      throw new Error("Independent verifier package cache contains an unsupported entry");
+    }
+  }
+  return hash.digest("hex");
 }
 
 async function makeReadOnly(root: string): Promise<void> {
@@ -136,15 +205,57 @@ async function makeReadOnly(root: string): Promise<void> {
     if (entry.isSymbolicLink()) {
       throw new Error("Independent verifier package cache may not contain symbolic links");
     }
-    if (entry.isDirectory()) await makeReadOnly(child);
-    else await chmod(child, 0o444);
+    if (entry.isDirectory()) {
+      await makeReadOnly(child);
+    } else {
+      const metadata = await lstat(child);
+      await chmod(child, 0o444 | (metadata.mode & 0o111));
+    }
   }
   await chmod(root, 0o555);
+}
+
+async function addEntrypointShim(
+  executable: string,
+  binary: "pnpm" | "pnpx",
+  version: string,
+): Promise<string> {
+  const shim = path.join(path.dirname(executable), binary);
+  try {
+    await lstat(shim);
+    throw packageManagerError(
+      version,
+      `the staged package already contains an unexpected ${binary} shim`,
+    );
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Independent verifier")) throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  await cp(executable, shim, { force: false, errorOnExist: true });
+  await chmod(shim, 0o555);
+  return shim;
+}
+
+async function assertEntrypointShim(
+  executable: string,
+  binary: "pnpm" | "pnpx",
+  version: string,
+): Promise<void> {
+  const shim = path.join(path.dirname(executable), binary);
+  try {
+    const metadata = await lstat(shim);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("not a plain file");
+    const [source, copy] = await Promise.all([readFile(executable), readFile(shim)]);
+    if (!source.equals(copy)) throw new Error("content differs");
+  } catch {
+    throw packageManagerError(version, `the staged package ${binary} shim changed after preparation`);
+  }
 }
 
 export async function stagePackageManager(
   worktree: string,
   scratchDir: string,
+  binary: "pnpm" | "pnpx" = "pnpm",
 ): Promise<StagedPackageManager> {
   const spec = await readPackageManager(worktree);
   const corepackHome = path.join(scratchDir, "corepack");
@@ -157,14 +268,45 @@ export async function stagePackageManager(
       "pre-provision the exact package in the host Corepack cache before dispatch",
     );
   }
-  const digest = await assertPackageManagerCache(corepackHome, spec);
+  const validated = await assertPackageManagerCache(corepackHome, spec, binary);
+  await addEntrypointShim(validated.executable, binary, spec.version);
+  const digest = await artifactDigest(packageDirectory(corepackHome, spec));
   await makeReadOnly(corepackHome);
   return {
     name: spec.name,
+    binary,
     version: spec.version,
-    digest,
+    digest: validated.digest,
+    ...(spec.integrity ? { integrity: spec.integrity } : {}),
+    artifactDigest: `sha256:${digest}`,
     corepackHome,
+    executable: validated.executable,
+    entrypoint: validated.entrypoint,
     source: "verifier-owned-corepack-cache",
     network: "denied",
   };
+}
+
+export async function assertStagedPackageManager(
+  staged: StagedPackageManager,
+): Promise<void> {
+  const spec: PackageManagerSpec = {
+    name: staged.name,
+    version: staged.version,
+    reference: `${staged.name}@${staged.version}`,
+    ...(staged.integrity ? { integrity: staged.integrity } : {}),
+  };
+  const validated = await assertPackageManagerCache(staged.corepackHome, spec, staged.binary);
+  await assertEntrypointShim(validated.executable, staged.binary, staged.version);
+  const actualArtifactDigest = `sha256:${await artifactDigest(
+    packageDirectory(staged.corepackHome, spec),
+  )}`;
+  if (
+    validated.digest !== staged.digest
+    || validated.entrypoint !== staged.entrypoint
+    || validated.executable !== staged.executable
+    || actualArtifactDigest !== staged.artifactDigest
+  ) {
+    throw packageManagerError(staged.version, "the staged package digest changed after preparation");
+  }
 }

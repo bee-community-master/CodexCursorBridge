@@ -39,8 +39,13 @@ export interface PreparedWorktree {
 
 export interface PackageManagerAttestation {
   name: string;
+  binary: "pnpm" | "pnpx";
   version: string;
   digest: string;
+  integrity?: string;
+  artifactDigest: string;
+  runtime: "node";
+  entrypoint: string;
   source: "verifier-owned-corepack-cache";
   network: "denied";
 }

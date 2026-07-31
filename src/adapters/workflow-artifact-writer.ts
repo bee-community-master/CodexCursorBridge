@@ -103,7 +103,11 @@ export class WorkflowArtifactWriter {
           `    package manager: ${result.packageManager.name}@${result.packageManager.version}`
             + ` digest=${result.packageManager.digest}`
             + ` source=${result.packageManager.source}`
-            + ` network=${result.packageManager.network}`,
+            + ` network=${result.packageManager.network}`
+            + ` binary=${result.packageManager.binary}`
+            + ` artifactDigest=${result.packageManager.artifactDigest}`
+            + ` runtime=${result.packageManager.runtime}`
+            + ` entrypoint=${result.packageManager.entrypoint}`,
         ] : []),
         ...(result.output
           ? redactSensitiveText(result.output).split("\n").map((line) => `    ${line}`)

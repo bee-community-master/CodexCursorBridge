@@ -8,7 +8,7 @@ Codex가 계획하고 사용자가 승인한 작업을 Cursor가 구현하도록
 2. 커밋된 Task의 commit/blob SHA를 SQLite Job에 기록합니다.
 3. launchd가 관리하는 supervisor가 Job을 원자적으로 claim하고 lease/heartbeat를 유지합니다.
 4. Cursor는 프로젝트 설정 source가 비활성화된 SDK sandbox에서 구조화된 `completed`, `blocked`, `needs_input` 결과를 제출하며, repair가 필요하면 실패 명령과 출력을 다음 시도에 내구적으로 보존합니다.
-5. Bridge는 승인 기준에서 만든 독립 Git index, 최소 환경, 네트워크 차단 sandbox로 검증하고, 검증 전후의 immutable candidate tree와 변경 범위를 다시 대조합니다. package-manager 검증은 후보 `package.json`의 정확한 `packageManager` 버전을 verifier-owned read-only Corepack cache에 stage하며, Corepack integrity digest와 `network=denied`를 report/attestation에 남깁니다. `required_new_tests`가 있으면 삭제되지 않은 테스트 파일 변경도 최종 후보에 포함되어야 하며, 다른 검증 실패와 함께 제한된 repair 근거로 전달됩니다.
+5. Bridge는 승인 기준에서 만든 독립 Git index, 최소 환경, 네트워크 차단 sandbox로 검증하고, 검증 전후의 immutable candidate tree와 변경 범위를 다시 대조합니다. package-manager 검증은 후보 `package.json`의 정확한 `packageManager` 버전을 verifier-owned read-only Corepack cache에 stage한 뒤 `node`가 그 cache의 고정 entrypoint를 직접 실행합니다. Corepack integrity와 실제 artifact tree digest, 실행 binary/argv, `network=denied`를 report/attestation에 남기며, `COREPACK_*` task 환경과 package-manager 전환 인자는 거부합니다. `required_new_tests`가 있으면 삭제되지 않은 테스트 파일 변경도 최종 후보에 포함되어야 하며, 다른 검증 실패와 함께 제한된 repair 근거로 전달됩니다.
 6. 최종 후보 tree/patch hash가 고정된 뒤 Git hook·commit/push signing을 비활성화하고, 등록된 fetch/push 원격에만 commit, push, Draft PR을 멱등 체크포인트로 수행합니다.
 7. 성공 상태는 `DELIVERED_REVIEW_REQUIRED`입니다. 자동 구현 완료가 사람/Codex 리뷰 완료를 뜻하지 않습니다.
 
@@ -51,10 +51,10 @@ pnpm repo:add -- --alias my-service --path /absolute/path/to/my-service
 등록 경로는 standalone Git clone이어야 합니다. linked worktree는 `.git`이 pointer file이고
 공통 Git 디렉터리가 분리되므로 `repo:add`에서 명확한 오류와 함께 거부됩니다.
 
-독립 검증은 host Corepack cache의 정확한 package-manager artifact만 scratch HOME으로 복사해
-read-only로 고정합니다. cache가 없으면 검증이 실패하며 verifier가 registry에 연결해 몰래
-설치하지 않습니다. dispatch 전에 운영자가 `corepack pack pnpm@<packageManager 버전>` 같은
-명시적 provisioning을 수행해야 합니다.
+독립 검증은 host Corepack cache의 정확한 package-manager artifact만 verifier 전용 cache root로
+복사해 read-only로 고정하고, writable scratch와 분리합니다. cache가 없으면 검증이 실패하며
+verifier가 registry에 연결해 몰래 설치하지 않습니다. dispatch 전에 운영자가
+`corepack pack pnpm@<packageManager 버전>` 같은 명시적 provisioning을 수행해야 합니다.
 
 ## Task 작성과 승인
 
