@@ -83,6 +83,128 @@ async function withCorepackHome<T>(sourceHome: string, action: () => Promise<T>)
   }
 }
 
+type ExtractedCommandOptionKind = "boolean" | "optional" | "required";
+type ExtractedCommandMetadata = {
+  required: string[];
+  optional: string[];
+  boolean: string[];
+  shorthands: Record<string, string | string[]>;
+};
+
+function extractBalancedObject(source: string, marker: string): string {
+  const markerStart = source.indexOf(marker);
+  if (markerStart < 0) throw new Error(`Authoritative pnpm metadata marker missing: ${marker}`);
+  const open = source.indexOf("{", markerStart);
+  if (open < 0) throw new Error(`Authoritative pnpm metadata object missing: ${marker}`);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "{") depth += 1;
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, index + 1);
+    }
+  }
+  throw new Error(`Authoritative pnpm metadata object is unterminated: ${marker}`);
+}
+
+function extractPickedOptionNames(block: string): string[] {
+  const names: string[] = [];
+  for (const match of block.matchAll(/pick_default\(\s*\[([\s\S]*?)\]\s*,\s*types2\s*\)/g)) {
+    for (const name of match[1]?.matchAll(/["']([^"']+)["']/g) ?? []) {
+      if (name[1]) names.push(name[1]);
+    }
+  }
+  return names;
+}
+
+function extractDirectOptionTypes(block: string): Map<string, string> {
+  const entries = new Map<string, string>();
+  for (const line of block.split("\n")) {
+    const match = /^\s*(?:"([^"]+)"|([A-Za-z][\w-]*))\s*:\s*(.+?)(?:,\s*)?$/.exec(line);
+    const name = match?.[1] ?? match?.[2];
+    if (name && match?.[3]) entries.set(name, match[3].trim());
+  }
+  return entries;
+}
+
+function classifyExtractedOptionType(type: string): ExtractedCommandOptionKind {
+  const normalized = type.trim();
+  if (normalized === "Boolean") return "boolean";
+  if (/\[.*(?:Boolean|\btrue\b|\bfalse\b).*\]/s.test(normalized)) return "optional";
+  return "required";
+}
+
+function extractAuthoritativeTypes(source: string): Map<string, string> {
+  const merged = new Map<string, string>();
+  for (const marker of ["pnpmTypes = {", "npmConfigTypes = {"]) {
+    for (const [name, type] of extractDirectOptionTypes(extractBalancedObject(source, marker))) {
+      merged.set(name, type);
+    }
+  }
+  return merged;
+}
+
+function extractCommandMetadata(
+  source: string,
+  functionNames: readonly string[],
+  types: Map<string, string>,
+  includeIfPresent: boolean,
+): Omit<ExtractedCommandMetadata, "shorthands"> {
+  const entries = new Map<string, ExtractedCommandOptionKind>();
+  for (const functionName of functionNames) {
+    const marker = source.includes(`function ${functionName}()`)
+      ? `function ${functionName}()`
+      : `${functionName} = () =>`;
+    const block = extractBalancedObject(source, marker);
+    for (const name of extractPickedOptionNames(block)) {
+      const type = types.get(name);
+      if (!type) throw new Error(`Authoritative pnpm option type missing: ${name}`);
+      entries.set(name, classifyExtractedOptionType(type));
+    }
+    for (const [name, type] of extractDirectOptionTypes(block)) {
+      entries.set(name, classifyExtractedOptionType(type));
+    }
+  }
+  if (includeIfPresent) {
+    const ifPresent = extractDirectOptionTypes(extractBalancedObject(source, "IF_PRESENT_OPTION = {"));
+    for (const [name, type] of ifPresent) entries.set(name, classifyExtractedOptionType(type));
+  }
+  const base: Record<ExtractedCommandOptionKind, Set<string>> = {
+    required: new Set(Object.keys(packageManagerOptionCatalog.requiredValueOptions)),
+    optional: new Set(Object.keys(packageManagerOptionCatalog.optionalValueOptions)),
+    boolean: new Set(packageManagerOptionCatalog.booleanOptions),
+  };
+  const result = { required: [], optional: [], boolean: [] } as Omit<ExtractedCommandMetadata, "shorthands">;
+  for (const [name, kind] of entries) {
+    const target = kind === "boolean" ? result.boolean : kind === "optional" ? result.optional : result.required;
+    const baseOptions = base[kind === "boolean" ? "boolean" : kind === "optional" ? "optional" : "required"];
+    if (!baseOptions.has(name)) target.push(name);
+  }
+  for (const values of Object.values(result)) values.sort();
+  return result;
+}
+
+function extractShorthands(source: string, marker: string, references: Readonly<Record<string, string | string[]>> = {}): Record<string, string | string[]> {
+  const block = extractBalancedObject(source, marker);
+  const result: Record<string, string | string[]> = {};
+  for (const match of block.matchAll(/(?:^|[,\n])\s*([A-Za-z][\w-]*)\s*:\s*(\[[\s\S]*?\]|"[^"]*"|'[^']*'|[A-Za-z][\w.]+)/g)) {
+    const name = match[1];
+    const value = match[2];
+    if (!name || !value) continue;
+    if (value.startsWith("[")) {
+      result[name] = [...value.matchAll(/["']([^"']+)["']/g)].flatMap((item) => item[1] ? [item[1]] : []);
+    } else if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+      result[name] = value.slice(1, -1);
+    } else if (references[value] !== undefined) {
+      result[name] = references[value];
+    } else {
+      result[name] = value;
+    }
+  }
+  return result;
+}
+
 async function legacyArtifactDigest(root: string, relative = ""): Promise<string> {
   const hash = createHash("sha256");
   const entries = await readdir(path.join(root, relative), { withFileTypes: true });
@@ -121,6 +243,76 @@ describe("independent package-manager staging", () => {
     expect(splitDigest).not.toBe(mergedDigest);
   });
 
+  it("matches exact authoritative exec/run command metadata", async () => {
+    const source = await readFile(
+      path.join(
+        packageManagerDirectory(hostCorepackHome(), fakePackageManagerSpec),
+        "dist",
+        "pnpm.mjs",
+      ),
+      "utf8",
+    );
+    const types = extractAuthoritativeTypes(source);
+    const runMetadata = extractCommandMetadata(
+      source,
+      ["rcOptionsTypes40", "cliOptionsTypes39"],
+      types,
+      true,
+    );
+    const execMetadata = extractCommandMetadata(
+      source,
+      ["rcOptionsTypes41", "cliOptionsTypes40"],
+      types,
+      false,
+    );
+    const runShorthands = extractShorthands(source, "shorthands13 = {");
+    const execShorthands = extractShorthands(source, "shorthands14 = {", {
+      "shorthands13.parallel": runShorthands.parallel ?? [],
+    });
+
+    expect(runMetadata).toEqual({
+      required: ["resume-from"],
+      optional: ["scripts-prepend-node-path"],
+      boolean: ["if-present", "recursive", "report-summary", "reverse"],
+    });
+    expect(execMetadata).toEqual({
+      required: ["resume-from"],
+      optional: [],
+      boolean: ["recursive", "report-summary", "reverse", "shell-mode"],
+    });
+    expect(runShorthands).toEqual({
+      parallel: [
+        "--workspace-concurrency=Infinity",
+        "--no-sort",
+        "--stream",
+        "--recursive",
+      ],
+      sequential: ["--workspace-concurrency=1"],
+    });
+    expect(execShorthands).toEqual({
+      parallel: runShorthands.parallel,
+      c: "--shell-mode",
+    });
+    expect({
+      required: Object.keys(packageManagerOptionCatalog.commandLevelOptions.run.requiredValueOptions).sort(),
+      optional: Object.keys(packageManagerOptionCatalog.commandLevelOptions.run.optionalValueOptions).sort(),
+      boolean: [...packageManagerOptionCatalog.commandLevelOptions.run.booleanOptions].sort(),
+      shorthands: packageManagerOptionCatalog.commandLevelOptions.run.shorthands,
+    }).toEqual({
+      ...runMetadata,
+      shorthands: runShorthands,
+    });
+    expect({
+      required: Object.keys(packageManagerOptionCatalog.commandLevelOptions.exec.requiredValueOptions).sort(),
+      optional: Object.keys(packageManagerOptionCatalog.commandLevelOptions.exec.optionalValueOptions).sort(),
+      boolean: [...packageManagerOptionCatalog.commandLevelOptions.exec.booleanOptions].sort(),
+      shorthands: packageManagerOptionCatalog.commandLevelOptions.exec.shorthands,
+    }).toEqual({
+      ...execMetadata,
+      shorthands: execShorthands,
+    });
+  });
+
   it.each([
     ["self-update"],
     ["--self-update"],
@@ -147,6 +339,11 @@ describe("independent package-manager staging", () => {
     ["--changed-files-ignore-pattern", "*.md", "exec", "pnpm", "--version"],
     ["--filter-prod", "workspace", "exec", "pnpm", "--version"],
     ["--test-pattern", "*.test.ts", "exec", "pnpm", "--version"],
+    ["--node-package-map-type", "-F", "exec", "node", "--version"],
+    ["--changed-files-ignore-pattern", "-F", "exec", "node", "--version"],
+    ["--loglevel", "-F", "exec", "node", "--version"],
+    ["--test-pattern", "-F", "exec", "node", "--version"],
+    ["--workspace-packages", "-F", "exec", "node", "--version"],
     ["--node-package-map-type", "loose", "exec", "node", "--version"],
     ["--node-package-map-type=loose", "exec", "node", "--version"],
     ["--pm-on-fail=ignore"],
@@ -156,6 +353,51 @@ describe("independent package-manager staging", () => {
   ])("rejects package-manager control arguments: %s", (...args: string[]) => {
     expect(() => assertPackageManagerControlArgs(args)).toThrow(/package-manager|switch/i);
   });
+
+  const requiredValueSentinels = [
+    "-F",
+    "-C",
+    "-r",
+    "-x",
+    "-abc",
+    "-1",
+    "--exec",
+    "--env",
+    "--setup",
+    "--color",
+    "--filter",
+    "--dir",
+    "--loglevel",
+    "--resume-from",
+    "--node-package-map-type",
+    "--changed-files-ignore-pattern",
+    "--test-pattern",
+    "--workspace-packages",
+    "--pm-on-fail",
+    "--config",
+    "--no-color",
+    "--aggregate-output",
+    "--resolution-only",
+    "--foo",
+    "--bar",
+  ] as const;
+  const requiredValueSentinelMatrix = [
+    "node-package-map-type",
+    "changed-files-ignore-pattern",
+    "loglevel",
+    "test-pattern",
+    "workspace-packages",
+  ].flatMap((option) => requiredValueSentinels.flatMap((sentinel) =>
+    (["exec", "env", "setup"] as const).map((command) => [option, sentinel, command] as const),
+  ));
+
+  it.each(requiredValueSentinelMatrix)(
+    "keeps checking the command after a required option consumes an option-looking value: --%s %s %s",
+    (option, sentinel, command) => {
+      expect(() => assertPackageManagerControlArgs([`--${option}`, sentinel, command, "node"]))
+        .toThrow(/package-manager|switch/i);
+    },
+  );
 
   it.each([
     ["run", "exec"],

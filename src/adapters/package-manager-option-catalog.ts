@@ -9,9 +9,9 @@
  * dangerous `exec` command from the independent verifier.
  *
  * Source: pnpm@11.10.0 `pnpmTypes`, `npmConfigTypes`, GLOBAL_OPTIONS, and the
- * command `cliOptionsTypes`/`rcOptionsTypes` definitions in the provisioned
- * Corepack artifact.  Keep this catalog versioned with that exact staged
- * package-manager version.
+ * command `cliOptionsTypes`/`rcOptionsTypes` and shorthand definitions in the
+ * provisioned Corepack artifact. Keep this catalog versioned with that exact
+ * staged package-manager version.
  */
 
 export type PackageManagerRequiredValueKind =
@@ -19,7 +19,9 @@ export type PackageManagerRequiredValueKind =
   | "enum"
   | "number"
   | "string"
-  | "string-or-array";
+  | "string-or-array"
+  /** A String-like parser type that still consumes option-looking values. */
+  | "string-union";
 
 export interface PackageManagerOptionalValueOption {
   readonly values: readonly string[];
@@ -36,6 +38,7 @@ export interface PackageManagerCommandOptionCatalog {
   readonly requiredValueOptions: Readonly<Record<string, PackageManagerRequiredValueOption>>;
   readonly optionalValueOptions: Readonly<Record<string, PackageManagerOptionalValueOption>>;
   readonly booleanOptions: readonly string[];
+  readonly shorthands: Readonly<Record<string, string | readonly string[]>>;
 }
 
 const requiredValueOptions = {
@@ -43,9 +46,9 @@ const requiredValueOptions = {
   "audit-level": { kind: "enum", values: ["low", "moderate", "high", "critical"] },
   ca: { kind: "string-or-array" },
   "cache-dir": { kind: "string" },
-  cafile: { kind: "string" },
+  cafile: { kind: "string-union" },
   "catalog-mode": { kind: "enum", values: ["strict", "prefer", "manual"] },
-  cert: { kind: "string" },
+  cert: { kind: "string-union" },
   "changed-files-ignore-pattern": { kind: "string-or-array" },
   "child-concurrency": { kind: "number" },
   "config-dir": { kind: "string" },
@@ -72,15 +75,15 @@ const requiredValueOptions = {
   "global-virtual-store-dir": { kind: "string" },
   "hoist-pattern": { kind: "array" },
   "hoisting-limits": { kind: "enum", values: ["none", "workspaces", "dependencies"] },
-  "http-proxy": { kind: "string" },
-  "https-proxy": { kind: "string" },
+  "http-proxy": { kind: "string-union" },
+  "https-proxy": { kind: "string-union" },
   "init-author-email": { kind: "string" },
   "init-author-name": { kind: "string" },
-  "init-author-url": { kind: "string" },
+  "init-author-url": { kind: "string-union" },
   "init-license": { kind: "string" },
   "init-type": { kind: "enum", values: ["commonjs", "module"] },
   "init-version": { kind: "string" },
-  key: { kind: "string" },
+  key: { kind: "string-union" },
   libc: { kind: "string-or-array" },
   "lockfile-dir": { kind: "string" },
   loglevel: { kind: "enum", values: ["silent", "error", "warn", "info", "debug"] },
@@ -93,16 +96,16 @@ const requiredValueOptions = {
   "modules-cache-max-age": { kind: "number" },
   "modules-dir": { kind: "string" },
   "network-concurrency": { kind: "number" },
-  "node-options": { kind: "string" },
+  "node-options": { kind: "string-union" },
   "node-package-map-type": { kind: "enum", values: ["standard", "loose"] },
-  "node-version": { kind: "string" },
+  "node-version": { kind: "string-union" },
   "node-linker": { kind: "enum", values: ["pnp", "isolated", "hoisted"] },
   noproxy: { kind: "string" },
   "no-proxy": { kind: "string-or-array" },
   "npm-path": { kind: "string" },
-  "npmrc-auth-file": { kind: "string" },
+  "npmrc-auth-file": { kind: "string-union" },
   only: { kind: "enum", values: ["dev", "development", "prod", "production"] },
-  otp: { kind: "string" },
+  otp: { kind: "string-union" },
   os: { kind: "string-or-array" },
   "pack-destination": { kind: "string" },
   "pack-gzip-level": { kind: "number" },
@@ -111,19 +114,19 @@ const requiredValueOptions = {
   "peers-suffix-max-length": { kind: "number" },
   pnpmfile: { kind: "string" },
   "pm-on-fail": { kind: "enum", values: ["download", "error", "warn", "ignore"] },
-  prefix: { kind: "string" },
-  proxy: { kind: "string" },
+  prefix: { kind: "string-union" },
+  proxy: { kind: "string-union" },
   "public-hoist-pattern": { kind: "array" },
   "publish-branch": { kind: "string" },
-  "pnpr-server": { kind: "string" },
-  registry: { kind: "string" },
+  "pnpr-server": { kind: "string-union" },
+  registry: { kind: "string-union" },
   reporter: { kind: "string" },
   "resolution-mode": { kind: "enum", values: ["highest", "time-based", "lowest-direct"] },
   "runtime-on-fail": { kind: "enum", values: ["ignore", "warn", "error", "download"] },
   "save-catalog-name": { kind: "string" },
   "save-prefix": { kind: "string" },
   scope: { kind: "string" },
-  "script-shell": { kind: "string" },
+  "script-shell": { kind: "string-union" },
   "state-dir": { kind: "string" },
   "store-dir": { kind: "string" },
   "sync-injected-deps-after-scripts": { kind: "array" },
@@ -135,7 +138,7 @@ const requiredValueOptions = {
   "trust-policy-ignore-after": { kind: "number" },
   umask: { kind: "number" },
   "user-agent": { kind: "string" },
-  userconfig: { kind: "string" },
+  userconfig: { kind: "string-union" },
   "virtual-store-dir": { kind: "string" },
   "virtual-store-dir-max-length": { kind: "number" },
   "workspace-concurrency": { kind: "number" },
@@ -261,7 +264,16 @@ const commandLevelOptions = {
       "resume-from": { kind: "string" },
     },
     optionalValueOptions: {},
-    booleanOptions: ["shell-mode"] as const,
+    booleanOptions: ["shell-mode", "report-summary", "recursive", "reverse"] as const,
+    shorthands: {
+      parallel: [
+        "--workspace-concurrency=Infinity",
+        "--no-sort",
+        "--stream",
+        "--recursive",
+      ],
+      c: "--shell-mode",
+    },
   },
   run: {
     requiredValueOptions: {
@@ -275,7 +287,16 @@ const commandLevelOptions = {
         acceptsBoolean: true,
       },
     },
-    booleanOptions: ["if-present", "parallel", "recursive", "reverse", "sequential"] as const,
+    booleanOptions: ["if-present", "recursive", "reverse", "report-summary"] as const,
+    shorthands: {
+      parallel: [
+        "--workspace-concurrency=Infinity",
+        "--no-sort",
+        "--stream",
+        "--recursive",
+      ],
+      sequential: ["--workspace-concurrency=1"],
+    },
   },
 } as const satisfies Readonly<Record<string, PackageManagerCommandOptionCatalog>>;
 

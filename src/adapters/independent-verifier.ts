@@ -15,7 +15,10 @@ import {
   stagePackageManager,
 } from "./package-manager-cache.js";
 import { packageManagerOptionCatalog } from "./package-manager-option-catalog.js";
-import type { PackageManagerOptionalValueOption } from "./package-manager-option-catalog.js";
+import type {
+  PackageManagerOptionalValueOption,
+  PackageManagerRequiredValueOption,
+} from "./package-manager-option-catalog.js";
 import type { PreparedWorktreeGuard } from "./prepared-worktree-guard.js";
 import type { WorkflowLogger } from "./workflow-logger.js";
 
@@ -30,8 +33,9 @@ function usesPnpm(command: string): command is PackageManagerBinary {
   return command === "pnpm" || command === "pnpx";
 }
 
-const packageManagerValueOptions: Set<string> = new Set(
-  Object.keys(packageManagerOptionCatalog.allRequiredValueOptions).map((option) => `--${option}`),
+const packageManagerRequiredValueOptions: Map<string, PackageManagerRequiredValueOption> = new Map(
+  Object.entries(packageManagerOptionCatalog.allRequiredValueOptions)
+    .map(([option, spec]) => [`--${option}`, spec] as [string, PackageManagerRequiredValueOption]),
 );
 
 const packageManagerOptionalValueOptions: Map<string, PackageManagerOptionalValueOption> = new Map(
@@ -40,7 +44,11 @@ const packageManagerOptionalValueOptions: Map<string, PackageManagerOptionalValu
 );
 
 const packageManagerBooleanOptions = new Set(
-  packageManagerOptionCatalog.booleanOptions.map((option) => `--${option}`),
+  [
+    ...packageManagerOptionCatalog.booleanOptions,
+    ...Object.values(packageManagerOptionCatalog.commandLevelOptions)
+      .flatMap((command) => command.booleanOptions),
+  ].map((option) => `--${option}`),
 );
 
 const packageManagerShortValueOptions = new Set(
@@ -61,6 +69,18 @@ function isOptionalPackageManagerValue(option: string, value: string): boolean {
   const spec = packageManagerOptionalValueOptions.get(option);
   if (!spec) return false;
   return spec.values.includes(value) || spec.acceptsBoolean && (value === "true" || value === "false");
+}
+
+function requiredPackageManagerValueConsumes(
+  option: string,
+  value: string | undefined,
+): boolean {
+  if (value === undefined || value === "--") return false;
+  const spec = packageManagerRequiredValueOptions.get(option);
+  if (!spec) return false;
+  // nopt's exact String type treats a following option as an omitted value;
+  // unions, enums, arrays, numbers, paths, and URLs consume it as their value.
+  return spec.kind !== "string" || !value.startsWith("-");
 }
 
 export function assertPackageManagerControlArgs(args: readonly string[]): void {
@@ -105,9 +125,9 @@ export function assertPackageManagerControlArgs(args: readonly string[]): void {
           }
           continue;
         }
-        if (packageManagerValueOptions.has(argument)) {
+        if (packageManagerRequiredValueOptions.has(argument)) {
           const next = args[index + 1];
-          if (next !== "--" && next !== undefined && !next.startsWith("-")) {
+          if (requiredPackageManagerValueConsumes(argument, next)) {
             index += 1;
           }
           continue;
