@@ -83,9 +83,9 @@ export async function readPackageManager(worktree: string): Promise<PackageManag
 
 export function hostCorepackHome(): string {
   const cacheRoot = process.env.XDG_CACHE_HOME
-    ?? path.join(os.homedir(), ".cache");
+    || path.join(os.homedir(), ".cache");
   return process.env.COREPACK_HOME
-    ?? path.join(cacheRoot, "node", "corepack");
+    || path.join(cacheRoot, "node", "corepack");
 }
 
 export function packageManagerDirectory(corepackHome: string, spec: PackageManagerSpec): string {

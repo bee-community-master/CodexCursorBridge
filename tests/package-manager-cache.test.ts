@@ -243,6 +243,26 @@ describe("independent package-manager staging", () => {
     expect(splitDigest).not.toBe(mergedDigest);
   });
 
+  it.each([
+    ["unset", undefined],
+    ["defined-empty", ""],
+  ] as const)("treats COREPACK_HOME=%s as the host default", async (_label, value) => {
+    const previousCorepackHome = process.env.COREPACK_HOME;
+    const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+    const cacheRoot = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-default-cache-"));
+    try {
+      process.env.XDG_CACHE_HOME = cacheRoot;
+      if (value === undefined) delete process.env.COREPACK_HOME;
+      else process.env.COREPACK_HOME = value;
+      expect(hostCorepackHome()).toBe(path.join(cacheRoot, "node", "corepack"));
+    } finally {
+      if (previousCorepackHome === undefined) delete process.env.COREPACK_HOME;
+      else process.env.COREPACK_HOME = previousCorepackHome;
+      if (previousXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  });
+
   it("matches exact authoritative exec/run command metadata", async () => {
     const source = await readFile(
       path.join(
