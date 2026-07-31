@@ -3,7 +3,11 @@ import type { ImplementerOutcome, PublicationStatePort } from "../application/wo
 import type { Attempt } from "../domain/job.js";
 import { redactSensitiveText, safeErrorMessage } from "../application/redaction.js";
 import { eventKey, stableEventValue } from "./cursor-run-recovery.js";
-import { deliverRunEvent, drainPendingRunEvents } from "./cursor-run-event-outbox.js";
+import {
+  CursorRunEventDeliveryUncertainError,
+  deliverRunEvent,
+  drainPendingRunEvents,
+} from "./cursor-run-event-outbox.js";
 
 type SubmittedOutcome = {
   status: "completed" | "blocked" | "needs_input";
@@ -45,7 +49,7 @@ export async function waitForOutcome(
   }, 500);
   cancellationTimer.unref();
   try {
-    await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely);
+    await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id);
     const occurrences = new Map<string, number>();
     for await (const event of run.stream()) {
       const signature = stableEventValue(event);
@@ -61,6 +65,9 @@ export async function waitForOutcome(
         logEvent,
         logSafely,
       );
+    }
+    if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
+      throw new CursorRunEventDeliveryUncertainError(run.id);
     }
     const result = await run.wait();
     if (result.status === "cancelled" && store.isCancellationRequested(jobId)) {

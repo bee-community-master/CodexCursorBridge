@@ -2,6 +2,13 @@ import type { Attempt } from "../domain/job.js";
 import type { PublicationStatePort } from "../application/workflow-ports.js";
 import { safeErrorMessage } from "../application/redaction.js";
 
+export class CursorRunEventDeliveryUncertainError extends Error {
+  constructor(runId: string) {
+    super(`CURSOR_TRANSPORT_UNCERTAIN: Cursor run event delivery remains pending for run ${runId}.`);
+    this.name = "CursorRunEventDeliveryUncertainError";
+  }
+}
+
 type RunEventStore = Pick<
   PublicationStatePort,
   "beginRunEvent" | "completeRunEvent" | "listPendingRunEvents"
@@ -16,7 +23,7 @@ export async function deliverRunEvent(
   eventSummary: string,
   logEvent: (eventKey: string, message: string) => Promise<void>,
   logSafely: (message: string) => Promise<void>,
-): Promise<void> {
+): Promise<boolean> {
   const state = store.beginRunEvent(
     jobId,
     attempt.id,
@@ -25,14 +32,14 @@ export async function deliverRunEvent(
     eventKey,
     eventSummary,
   );
-  if (state === "LOGGED") return;
+  if (state === "LOGGED") return true;
   try {
     await logEvent(eventKey, eventSummary);
   } catch (error) {
     await logSafely(
       `Cursor run event delivery remains pending key=${eventKey} error=${safeErrorMessage(error)}`,
     );
-    return;
+    return false;
   }
   store.completeRunEvent(
     jobId,
@@ -41,6 +48,7 @@ export async function deliverRunEvent(
     runId,
     eventKey,
   );
+  return true;
 }
 
 export async function drainPendingRunEvents(
@@ -49,16 +57,18 @@ export async function drainPendingRunEvents(
   store: RunEventStore,
   logEvent: (eventKey: string, message: string) => Promise<void>,
   logSafely: (message: string) => Promise<void>,
-): Promise<void> {
-  if (!attempt.cursorRunId) return;
+  runId = attempt.cursorRunId ?? "",
+): Promise<boolean> {
+  if (!runId) return true;
   const pending = store.listPendingRunEvents(
     jobId,
     attempt.id,
     attempt.workerToken,
-    attempt.cursorRunId,
+    runId,
   );
+  let allDelivered = true;
   for (const event of pending) {
-    await deliverRunEvent(
+    const delivered = await deliverRunEvent(
       jobId,
       attempt,
       store,
@@ -68,5 +78,7 @@ export async function drainPendingRunEvents(
       logEvent,
       logSafely,
     );
+    allDelivered = delivered && allDelivered;
   }
+  return allDelivered;
 }

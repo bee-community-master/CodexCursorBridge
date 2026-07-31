@@ -28,7 +28,7 @@ function runtimePaths(root: string): RuntimePaths {
 
 async function runPendingClaimShutdownChild(
   signal: "SIGTERM" | "SIGINT",
-): Promise<{ code: number | null; signal: NodeJS.Signals | null; elapsedMs: number; stderr: string }> {
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; elapsedMs: number; stderr: string; root: string }> {
   const script = `
     import { mkdtemp } from "node:fs/promises";
     import os from "node:os";
@@ -45,6 +45,8 @@ async function runPendingClaimShutdownChild(
     });
     let stopping = false;
     process.once(${JSON.stringify(signal)}, () => { stopping = true; });
+    const independentHandle = setInterval(() => undefined, 1_000);
+    void independentHandle;
     const paths = {
       projectRoot: root, home: root, configFile: path.join(root, "config.json"),
       databaseFile: path.join(root, "jobs.sqlite"), logsDir: path.join(root, "logs"),
@@ -57,7 +59,7 @@ async function runPendingClaimShutdownChild(
       heartbeatIntervalMs: 20,
       shouldStop: () => stopping,
       processClaim: async () => {
-        process.stdout.write("READY\\n");
+        process.stdout.write("READY " + root + "\\n");
         await new Promise(() => undefined);
       },
     }).catch(() => undefined);
@@ -72,14 +74,16 @@ async function runPendingClaimShutdownChild(
   const startedAt = Date.now();
   return new Promise((resolve, reject) => {
     let signalled = false;
+    let root = "";
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error(`shutdown child timed out for ${signal}; stderr=${stderr}`));
     }, 2_000);
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
-      if (!signalled && stdout.includes("READY")) {
+      if (!signalled && stdout.includes("READY ")) {
         signalled = true;
+        root = stdout.match(/READY ([^\n]+)/)?.[1] ?? "";
         child.kill(signal);
       }
     });
@@ -90,7 +94,7 @@ async function runPendingClaimShutdownChild(
     });
     child.once("exit", (code, childSignal) => {
       clearTimeout(timeout);
-      resolve({ code, signal: childSignal, elapsedMs: Date.now() - startedAt, stderr });
+      resolve({ code, signal: childSignal, elapsedMs: Date.now() - startedAt, stderr, root });
     });
   });
 }
@@ -104,6 +108,11 @@ describe("durable supervisor recovery", () => {
         signal: null,
       });
       expect(result.elapsedMs).toBeLessThan(1_500);
+      const replacement = new JobStore(path.join(result.root, "jobs.sqlite"));
+      stores.push(replacement);
+      const reclaimed = replacement.claimNext("replacement-worker", 60_000);
+      expect(reclaimed?.resumed).toBe(true);
+      expect(reclaimed?.attempt.status).toBe("PREPARING");
     }
   });
 

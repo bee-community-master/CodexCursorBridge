@@ -71,6 +71,9 @@ MCP SDK, 프로세스 실행기 같은 outbound adapter를 import하지 않는�
   event는 run별 durable outbox에서 `PENDING`으로 먼저 보존한 뒤 로그에 기록하고
   `LOGGED`로 전이한다. stable event marker를 사용하는 로그 writer와 reclaim drain은
   write 성공 후 worker가 중단돼도 재전달하고 confirmed event를 중복 기록하지 않는다.
+  stream 종료 직전 drain이 남은 pending을 확인하며, 로그 sink가 계속 실패하면
+  `CURSOR_TRANSPORT_UNCERTAIN`으로 Attempt를 active/reclaimable 상태에 둔다. 로그
+  파일 자체도 atomic lock으로 read/recheck/append를 직렬화한다.
 - SDK 전송 오류는 task의 `max_repair_attempts`와 별도의 3회 bounded retry를
   사용한다. 각 재시도 전에 local run 목록으로 이미 수락된 run을 확인하므로
   ambiguous send가 중복 run을 만들지 않는다. 연결이 끝내 불확실하면
@@ -80,7 +83,8 @@ MCP SDK, 프로세스 실행기 같은 outbound adapter를 import하지 않는�
   흡수하고 250ms부터 최대 30초까지 bounded exponential backoff를 적용한다. active
   claim heartbeat timer는 claim이 해결되기 전까지 process-referenced 상태로 유지해
   detached/replay 작업이 code 0 자연 종료로 사라지지 않게 하며, completion/error/finally
-  경로에서 정리한다. 예외가
+  경로에서 정리한다. SIGTERM/SIGINT는 process claim과 bounded grace race를 거친 뒤
+  참조된 미해결 handle도 강제로 종료해 lease 만료/reclaim을 보장한다. 예외가
   난 Attempt를 임의로 FAILED로 만들지 않으며, `supervisor.log`와 Job log에 전송
   진단을 남긴 뒤 replacement supervisor가 durable lease를 reclaim할 수 있게 한다.
 

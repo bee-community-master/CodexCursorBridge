@@ -439,21 +439,42 @@ describe("job state", () => {
     )!;
     const logger = new FileWorkflowLogger(second, job.id);
     const logEvent = (eventKey: string, message: string): Promise<void> => logger.logEvent(eventKey, message);
+    await logger.logEvent("offset:10", "assistant ten");
     await drainPendingRunEvents(job.id, reclaimed.attempt, second, logEvent, async () => undefined);
     await drainPendingRunEvents(job.id, reclaimed.attempt, second, logEvent, async () => undefined);
 
+    const secondIndex = stores.indexOf(second);
+    stores.splice(secondIndex, 1);
+    second.close();
+    const third = new JobStore(databaseFile);
+    stores.push(third);
+    const finalClaim = third.claimNext(
+      "worker-3",
+      60_000,
+      new Date("2026-07-23T00:01:03.000Z"),
+    )!;
+    const finalLogger = new FileWorkflowLogger(third, job.id);
+    await Promise.all([
+      finalLogger.logEvent("offset:race", "assistant race"),
+      finalLogger.logEvent("offset:race", "assistant race"),
+    ]);
+    await finalLogger.logEvent("offset:10", "assistant ten");
+    await finalLogger.logEvent("offset:1", "assistant running");
+
     const log = await readFile(logPath, "utf8");
-    expect(log.match(/CURSOR_RUN_EVENT:offset:1/g)).toHaveLength(1);
-    expect(second.listPendingRunEvents(
+    expect(log.split("\n").filter((line) => line.includes("CURSOR_RUN_EVENT:offset:race\t"))).toHaveLength(1);
+    expect(log.split("\n").filter((line) => line.includes("CURSOR_RUN_EVENT:offset:10\t"))).toHaveLength(1);
+    expect(log.split("\n").filter((line) => line.includes("CURSOR_RUN_EVENT:offset:1\t"))).toHaveLength(1);
+    expect(third.listPendingRunEvents(
       job.id,
-      reclaimed.attempt.id,
-      "worker-2",
+      finalClaim.attempt.id,
+      "worker-3",
       "run-outbox",
     )).toHaveLength(0);
-    expect(second.beginRunEvent(
+    expect(third.beginRunEvent(
       job.id,
-      reclaimed.attempt.id,
-      "worker-2",
+      finalClaim.attempt.id,
+      "worker-3",
       "run-outbox",
       "offset:1",
       "assistant running",

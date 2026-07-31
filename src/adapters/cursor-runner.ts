@@ -40,7 +40,10 @@ import {
   recoveredRunMetadata,
   supportsRunOperation,
 } from "./cursor-run-recovery.js";
-import { drainPendingRunEvents } from "./cursor-run-event-outbox.js";
+import {
+  CursorRunEventDeliveryUncertainError,
+  drainPendingRunEvents,
+} from "./cursor-run-event-outbox.js";
 import { waitForOutcome } from "./cursor-run-wait.js";
 import type { PreparedWorktreeGuard } from "./prepared-worktree-guard.js";
 import type { WorkflowLogger } from "./workflow-logger.js";
@@ -85,7 +88,9 @@ function isForceSendMarker(error: unknown): boolean {
 }
 
 function isRecoverableCursorRunError(error: unknown): boolean {
-  return isTransientCursorTransportError(error) || isForceSendMarker(error);
+  return error instanceof CursorRunEventDeliveryUncertainError
+    || isTransientCursorTransportError(error)
+    || isForceSendMarker(error);
 }
 
 function restoredOutcome(
@@ -197,18 +202,20 @@ export class CursorImplementer {
         });
       }),
     };
-    await drainPendingRunEvents(
+    const pendingEventsDelivered = await drainPendingRunEvents(
       this.#jobId,
       attempt,
       this.#store,
       this.#logEvent.bind(this),
       this.#logSafely.bind(this),
     );
+    if (!pendingEventsDelivered && attempt.cursorRunId) {
+      throw new CursorRunEventDeliveryUncertainError(attempt.cursorRunId);
+    }
     const recovered = await this.#recoverDurableRun(prepared, attempt);
     if (recovered.kind === "outcome" || recovered.kind === "recovery-required") {
       return recovered.outcome;
     }
-
     const agent = await this.#createOrResumeAgentWithRetry(
       prepared,
       task,
@@ -283,7 +290,6 @@ export class CursorImplementer {
       }
     }
   }
-
   async cancel(attempt: Attempt): Promise<void> {
     const active = this.#activeRuns.get(attempt.id);
     if (active) {
@@ -313,7 +319,6 @@ export class CursorImplementer {
       throw new Error(`Cursor run is still active after cancellation: ${attempt.cursorRunId}`);
     }
   }
-
   async #createOrResumeAgent(
     prepared: PreparedWorktree,
     task: ApprovedTask,
@@ -345,7 +350,6 @@ export class CursorImplementer {
       ? Agent.resume(attempt.cursorAgentId, options)
       : Agent.create({ ...options, idempotencyKey: `bridge-agent:${attempt.id}` });
   }
-
   async #createOrResumeAgentWithRetry(
     prepared: PreparedWorktree,
     task: ApprovedTask,
@@ -368,7 +372,6 @@ export class CursorImplementer {
       `Cursor agent could not be resumed after ${CURSOR_TRANSPORT_MAX_ATTEMPTS} attempts: ${safeErrorMessage(lastError)}`,
     );
   }
-
   async #recoverDurableRun(
     prepared: PreparedWorktree,
     attempt: Attempt,
@@ -392,7 +395,10 @@ export class CursorImplementer {
       }
       const recoveredAgentId = agentId ?? priorRun.agentId;
       if (priorRun.status === "running") {
-        if (!supportsRunOperation(priorRun, "wait")) {
+        if (
+          !supportsRunOperation(priorRun, "wait")
+          || (hasPersistedOutcome(attempt) && !supportsRunOperation(priorRun, "cancel"))
+        ) {
           return {
             kind: "recovery-required",
             outcome: detachedRunOutcome(priorRun, attempt, recoveredAgentId),
@@ -566,6 +572,7 @@ export class CursorImplementer {
           this.#logEvent.bind(this),
         );
       } catch (error) {
+        if (error instanceof CursorRunEventDeliveryUncertainError) throw error;
         if (!isRecoverableCursorRunError(error)) throw error;
         await this.#logTransportFailure("monitor", retry, error);
         const options: LocalCursorRunOptions = {
@@ -649,17 +656,11 @@ export class CursorImplementer {
   }
 
   async #logEvent(eventKey: string, message: string): Promise<void> {
-    if (this.#logger.logEvent) {
-      await this.#logger.logEvent(eventKey, message);
-      return;
-    }
-    await this.#logger.log(message);
+    await (this.#logger.logEvent?.(eventKey, message) ?? this.#logger.log(message));
   }
 
   async #delayAfterTransportFailure(retry: number): Promise<void> {
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, transportRetryDelayMs(retry));
-    });
+    await new Promise<void>((resolve) => setTimeout(resolve, transportRetryDelayMs(retry)));
   }
 
   async #stopPriorRun(
@@ -695,5 +696,4 @@ export class CursorImplementer {
     }
     return confirmed;
   }
-
 }

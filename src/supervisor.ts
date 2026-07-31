@@ -11,6 +11,7 @@ import { processClaim } from "./worker.js";
 const claimLeaseMs = 60_000;
 const heartbeatIntervalMs = 15_000;
 const shutdownPollMs = 25;
+const shutdownGraceMs = 250;
 const idlePollMs = 1_000;
 const supervisorBackoffBaseMs = 250;
 const supervisorBackoffCapMs = 30_000;
@@ -44,6 +45,30 @@ function delay(milliseconds: number, shouldStop: () => boolean): Promise<void> {
       resolve();
     }
   });
+}
+
+function watchForShutdown(shouldStop: () => boolean): {
+  promise: Promise<void>;
+  cancel: () => void;
+} {
+  let timer: NodeJS.Timeout | undefined;
+  const promise = new Promise<void>((resolve) => {
+    if (shouldStop()) {
+      resolve();
+      return;
+    }
+    timer = setInterval(() => {
+      if (!shouldStop()) return;
+      if (timer) clearInterval(timer);
+      resolve();
+    }, shutdownPollMs);
+  });
+  return {
+    promise,
+    cancel: (): void => {
+      if (timer) clearInterval(timer);
+    },
+  };
 }
 
 async function logSupervisorFailure(
@@ -83,8 +108,15 @@ export async function runSupervisor(
   const processClaimImpl = options.processClaim ?? processClaim;
   const workerToken = options.workerToken ?? `supervisor:${process.pid}:${randomUUID()}`;
   let failureStreak = 0;
+  let signalRequested = false;
+  const signalHandler = (): void => {
+    signalRequested = true;
+  };
+  process.once("SIGTERM", signalHandler);
+  process.once("SIGINT", signalHandler);
 
-  while (!shouldStop()) {
+  try {
+    while (!shouldStop()) {
     let claim;
     try {
       claim = store.claimNext(workerToken, leaseMs);
@@ -111,13 +143,31 @@ export async function runSupervisor(
         void logSupervisorFailure(paths, "heartbeat", error);
       }
     }, heartbeatMs);
-    const shutdownWatcher = setInterval(() => {
-      if (!shouldStop()) return;
-      clearInterval(heartbeat);
-      clearInterval(shutdownWatcher);
-    }, shutdownPollMs);
+    const shutdown = watchForShutdown(shouldStop);
+    const processPromise = Promise.resolve().then(() => processClaimImpl(store, claim, paths));
+    let processSettled = false;
+    processPromise.finally(() => {
+      processSettled = true;
+    }).catch(() => undefined);
     try {
-      await processClaimImpl(store, claim, paths);
+      const result = await Promise.race([
+        processPromise.then(
+          () => ({ kind: "completed" as const }),
+          (error: unknown) => ({ kind: "failed" as const, error }),
+        ),
+        shutdown.promise.then(() => ({ kind: "shutdown" as const })),
+      ]);
+      if (result.kind === "shutdown") {
+        clearInterval(heartbeat);
+        shutdown.cancel();
+        await Promise.race([
+          processPromise.then(() => undefined, () => undefined),
+          delay(shutdownGraceMs, () => false),
+        ]);
+        if (!processSettled && signalRequested) process.exit(0);
+        continue;
+      }
+      if (result.kind === "failed") throw result.error;
       failureStreak = 0;
     } catch (error) {
       // processClaim normally fences and records workflow failures itself. A
@@ -129,8 +179,12 @@ export async function runSupervisor(
       await sleep(supervisorBackoffMs(failureStreak));
     } finally {
       clearInterval(heartbeat);
-      clearInterval(shutdownWatcher);
+      shutdown.cancel();
     }
+  }
+  } finally {
+    process.removeListener("SIGTERM", signalHandler);
+    process.removeListener("SIGINT", signalHandler);
   }
 }
 

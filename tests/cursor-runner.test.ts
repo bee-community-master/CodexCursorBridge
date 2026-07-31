@@ -157,6 +157,41 @@ describe("Cursor implementer adapter", () => {
     expect(detachedRun.stream).not.toHaveBeenCalled();
   });
 
+  it("fences a persisted outcome when the live run cannot be cancelled", async () => {
+    const cancelUnsupportedRun = {
+      id: "cancel-unsupported-run",
+      agentId: "agent",
+      status: "running" as const,
+      supports: vi.fn((operation: string) => operation !== "cancel"),
+      unsupportedReason: vi.fn(() => "Cancellation is unavailable for this run"),
+      wait: vi.fn(),
+      stream: vi.fn(),
+    };
+    sdkMocks.getRun.mockResolvedValue(cancelUnsupportedRun);
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+    const outcome = await adapter.runImplementer({
+      worktree: "/worktree",
+      baseSha: "b".repeat(40),
+      pushBranch: "branch",
+      localBranch: "branch",
+    }, approvedTask({ mode: "new_draft" }), {
+      ...publishingAttempt(),
+      status: "IMPLEMENTING" as const,
+      cursorAgentId: "agent",
+      cursorRunId: cancelUnsupportedRun.id,
+      outcome: "completed" as const,
+      outcomeSummary: "Persisted structured outcome",
+    });
+
+    expect(outcome.status).toBe("blocked");
+    expect(outcome.reason).toMatch(/RECOVERY_REQUIRED/);
+    expect(sdkMocks.cancelRun).not.toHaveBeenCalled();
+    expect(sdkMocks.resume).not.toHaveBeenCalled();
+    expect(sdkMocks.create).not.toHaveBeenCalled();
+    expect(cancelUnsupportedRun.wait).not.toHaveBeenCalled();
+    expect(cancelUnsupportedRun.stream).not.toHaveBeenCalled();
+  });
+
   it("does not start a duplicate run when a finished run lacks a persisted outcome", async () => {
     sdkMocks.getRun.mockResolvedValue({
       id: "run",
