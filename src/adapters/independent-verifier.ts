@@ -15,6 +15,7 @@ import {
   stagePackageManager,
 } from "./package-manager-cache.js";
 import { packageManagerOptionCatalog } from "./package-manager-option-catalog.js";
+import type { PackageManagerOptionalValueOption } from "./package-manager-option-catalog.js";
 import type { PreparedWorktreeGuard } from "./prepared-worktree-guard.js";
 import type { WorkflowLogger } from "./workflow-logger.js";
 
@@ -29,8 +30,17 @@ function usesPnpm(command: string): command is PackageManagerBinary {
   return command === "pnpm" || command === "pnpx";
 }
 
-const packageManagerValueOptions = new Set(
-  packageManagerOptionCatalog.valueOptions.map((option) => `--${option}`),
+const packageManagerValueOptions: Set<string> = new Set(
+  Object.keys(packageManagerOptionCatalog.allRequiredValueOptions).map((option) => `--${option}`),
+);
+
+const packageManagerOptionalValueOptions: Map<string, PackageManagerOptionalValueOption> = new Map(
+  Object.entries(packageManagerOptionCatalog.allOptionalValueOptions)
+    .map(([option, spec]) => [`--${option}`, spec] as [string, PackageManagerOptionalValueOption]),
+);
+
+const packageManagerBooleanOptions = new Set(
+  packageManagerOptionCatalog.booleanOptions.map((option) => `--${option}`),
 );
 
 const packageManagerShortValueOptions = new Set(
@@ -46,6 +56,12 @@ const dangerousPackageManagerCommands = new Set([
   "shell",
   "with",
 ]);
+
+function isOptionalPackageManagerValue(option: string, value: string): boolean {
+  const spec = packageManagerOptionalValueOptions.get(option);
+  if (!spec) return false;
+  return spec.values.includes(value) || spec.acceptsBoolean && (value === "true" || value === "false");
+}
 
 export function assertPackageManagerControlArgs(args: readonly string[]): void {
   const settings = new Set<string>();
@@ -81,7 +97,22 @@ export function assertPackageManagerControlArgs(args: readonly string[]): void {
         continue;
       }
       if (argument.startsWith("--")) {
-        if (!argument.includes("=") && packageManagerValueOptions.has(argument)) index += 1;
+        if (argument.includes("=")) continue;
+        if (packageManagerOptionalValueOptions.has(argument)) {
+          const next = args[index + 1];
+          if (next !== "--" && next !== undefined && isOptionalPackageManagerValue(argument, next)) {
+            index += 1;
+          }
+          continue;
+        }
+        if (packageManagerValueOptions.has(argument)) {
+          const next = args[index + 1];
+          if (next !== "--" && next !== undefined) {
+            index += 1;
+          }
+          continue;
+        }
+        if (packageManagerBooleanOptions.has(argument)) continue;
         continue;
       }
       const shortOptions = argument.slice(1);
@@ -91,7 +122,12 @@ export function assertPackageManagerControlArgs(args: readonly string[]): void {
         if (shortOption === undefined || !packageManagerShortValueOptions.has(shortOption)) continue;
         shortValueOption = true;
         const attachedValue = shortOptions.slice(shortIndex + 1);
-        if (!attachedValue) index += 1;
+        if (!attachedValue) {
+          const next = args[index + 1];
+          if (next !== "--" && next !== undefined) {
+            index += 1;
+          }
+        }
         break;
       }
       if (shortValueOption) {

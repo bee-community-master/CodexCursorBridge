@@ -166,12 +166,58 @@ describe("independent package-manager staging", () => {
   });
 
   it.each(packageManagerOptionCatalog.valueOptions)(
-    "treats pnpm rc value option as an option value: --%s",
+    "treats pnpm required value option as an option value: --%s",
     (option) => {
       expect(() => assertPackageManagerControlArgs([`--${option}`, "value", "exec", "node"]))
         .toThrow(/package-manager|switch/i);
     },
   );
+
+  const optionalValueOptions = packageManagerOptionCatalog.allOptionalValueOptions;
+  const optionalValueCases = Object.entries(optionalValueOptions)
+    .map(([option, spec]) => [option, spec.values[0] ?? "true"] as const);
+
+  it.each(optionalValueCases)(
+    "consumes a declared optional value before a dangerous command: --%s %s",
+    (option, value) => {
+      for (const command of ["exec", "env", "setup"] as const) {
+        expect(() => assertPackageManagerControlArgs([`--${option}`, value, command, "node"]))
+          .toThrow(/package-manager|switch/i);
+      }
+    },
+  );
+
+  it.each(Object.keys(optionalValueOptions))(
+    "treats an omitted optional value as the command: --%s exec",
+    (option) => {
+      for (const command of ["exec", "env", "setup"] as const) {
+        expect(() => assertPackageManagerControlArgs([`--${option}`, command, "node"]))
+          .toThrow(/package-manager|switch/i);
+      }
+    },
+  );
+
+  it.each([
+    ["--color", "always"],
+    ["--color", "auto"],
+    ["--color", "never"],
+    ["--link-workspace-packages", "deep"],
+    ["--scripts-prepend-node-path", "auto"],
+    ["--scripts-prepend-node-path", "warn-only"],
+  ])("recognizes the authoritative optional-value domain: %s %s", (option, value) => {
+    expect(() => assertPackageManagerControlArgs([option, value, "run", "build"])).not.toThrow();
+  });
+
+  it("keeps command-level option provenance separate from exec metadata", () => {
+    expect(packageManagerOptionCatalog.commandLevelOptions.run.optionalValueOptions)
+      .toMatchObject({ "scripts-prepend-node-path": { values: ["auto", "warn-only"] } });
+    expect(packageManagerOptionCatalog.commandLevelOptions.exec.optionalValueOptions)
+      .not.toHaveProperty("scripts-prepend-node-path");
+    expect(packageManagerOptionCatalog.commandLevelOptions.exec.requiredValueOptions)
+      .toHaveProperty("resume-from");
+    expect(packageManagerOptionCatalog.commandLevelOptions.run.requiredValueOptions)
+      .toHaveProperty("resume-from");
+  });
 
   it("rejects every COREPACK_* task environment override", () => {
     expect(() => assertPackageManagerEnvironment({ COREPACK_ROOT: "/tmp/attacker" }))
