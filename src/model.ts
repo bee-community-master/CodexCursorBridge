@@ -35,7 +35,12 @@ export function chooseConfiguredGrok<T extends CursorModelLike>(
   if (!`${selected.id} ${selected.displayName}`.toLowerCase().includes("grok")) {
     throw new Error(`Configured Cursor model is not a Grok model: ${configuredId}`);
   }
-  if (configuredParams.length === 0) return { id: selected.id };
+  if (configuredParams.length === 0) {
+    return {
+      id: selected.id,
+      params: modelParamsForEffort(selected, "high", { fast: false }),
+    };
+  }
   const variant = selected.variants?.find((candidate) =>
     sameParameters(candidate.params, configuredParams)
   );
@@ -48,13 +53,18 @@ export function chooseConfiguredGrok<T extends CursorModelLike>(
 export function modelParamsForEffort(
   model: CursorModelLike,
   effort: string,
+  options: { fast?: boolean } = {},
 ): CursorModelParameter[] {
   const matches = model.variants?.filter((variant) =>
     variant.params.some((parameter) => parameter.id === "effort" && parameter.value === effort)
+    && (options.fast === undefined || variant.params.some((parameter) =>
+      parameter.id === "fast" && parameter.value === String(options.fast)
+    ))
   ) ?? [];
   const selected = matches.find((variant) => variant.isDefault) ?? matches[0];
   if (!selected) {
-    throw new Error(`Cursor model ${model.id} does not support ${effort} effort`);
+    const fastConstraint = options.fast === undefined ? "" : ` with fast=${options.fast}`;
+    throw new Error(`Cursor model ${model.id} does not support ${effort} effort${fastConstraint}`);
   }
   return selected.params.map((parameter) => ({ ...parameter }));
 }

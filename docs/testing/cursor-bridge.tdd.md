@@ -10,6 +10,7 @@ The source was the approved implementation plan in the Codex task. It was normal
 4. Passing Cursor prose is insufficient; Bridge verification must pass before commit, push, or draft PR.
 5. Another Mac can clone the repository and bootstrap the same direct main-agent MCP registration without copying secrets or absolute paths.
 6. A supervisor crash, duplicate delivery effect, or cancellation request cannot silently create a second attempt, publish an unverified tree, or report cancellation before confirmation.
+7. A bootstrap operator can select an available Grok model and have its validated `effort=high`, `fast=false` variant persisted and passed unchanged to every Cursor SDK run.
 
 ## RED/GREEN checkpoints
 
@@ -35,6 +36,8 @@ The source was the approved implementation plan in the Codex task. It was normal
 | GREEN: clean-code convergence | Current branch | Workflow phases, failure handling, publication finalization, worker failures, Cursor recovery, worktree preparation, Draft PR creation, remote validation, and terminal-attempt policy now have named responsibilities with explicit boundaries. |
 | RED: broader contract review | Current branch | `required_new_tests` was prompt-only, existing report files could retain permissive modes, and attestation verification output relied only on upstream redaction. |
 | GREEN: broader contract review | Current branch | Required test changes are a repairable final-candidate gate, all simultaneous verification failures are preserved for the bounded repair, report/attestation rewrites are atomic and owner-only, and attestation diagnostics are redacted again at persistence. |
+| RED: explicit Grok high effort | `bb71210` | Six tests failed because model params were discarded, Cursor received only `{ id }`, and no high-effort variant selector existed. |
+| GREEN: explicit Grok high effort | `7c85448` | Model params persist with backward compatibility, are validated against the live model variants, and reach Cursor SDK agent creation unchanged. |
 
 ## Guarantees
 
@@ -52,20 +55,21 @@ The source was the approved implementation plan in the Codex task. It was normal
 | 10 | No known dependency advisories remain. | `pnpm audit` | Security | PASS |
 | 11 | Verifier processes reject dynamic-loader/control overrides, receive a credential-scrubbed environment and macOS sandbox profile with network denied, and cannot resolve executables through writable path aliases; persisted diagnostics are bounded, redacted at the artifact boundary, atomically replaced, and owner-readable only. | `tests/task.test.ts`, `tests/sandbox.test.ts`, `tests/redaction.test.ts`, `tests/cursor-runner.test.ts`, `tests/workflow-artifact-writer.test.ts`, `tests/worker.test.ts` | Unit and integration | PASS |
 | 12 | Domain/application imports point inward, source imports are acyclic, implementation files stay below 700 lines, individual functions stay below 180 lines, and test suites stay below 900 lines. | `tests/architecture.test.ts` | Architecture | PASS |
+| 13 | Bootstrap selects the `effort=high`, `fast=false` variant for the chosen Grok model, rejects missing or mismatched variants, upgrades legacy model-ID-only configs at runtime, persists owner-only model params, and passes the exact selection to Cursor agent creation. | `tests/model.test.ts`, `tests/config.test.ts`, `tests/bootstrap.test.ts`, `tests/cursor-runner.test.ts` | Unit and integration | PASS |
 
 ## Final verification
 
-- `pnpm verify`: PASS — lint, typecheck, 180 tests in 27 files, coverage, build, MCP smoke.
-- Coverage: statements 87.14%, branches 81.03%, functions 97.32%, lines 90.29% for the core policy modules.
+- `pnpm verify`: PASS — lint, typecheck, 185 tests in 27 files, coverage, build, MCP smoke.
+- Coverage: statements 87.65%, branches 81.64%, functions 97.54%, lines 90.58% for the core policy modules.
 - Built supervisor runtime smoke: PASS — schema v3 DB initialized with mode `0600`, zero-job stats read back, and SIGINT shut down cleanly.
 - Real macOS verifier sandbox smoke: PASS — an allowlisted worktree write succeeded while network access and reads from a non-sensitive test Keychain outside the allowlisted roots were denied.
-- `pnpm smoke:cursor`: BLOCKED BEFORE SDK CALL — this Mac has no `codex-cursor-bridge/cursor-api-key` Keychain item; bootstrap/authentication remains an explicit owner action.
+- Explicit and legacy model-ID-only live Cursor smokes: PASS — both resolved `grok-4.5` to `effort=high`, `fast=false`; sandbox enabled and temporary repositories clean.
 - Plugin validator and skill quick validator: PASS.
 - `pnpm audit`: PASS — `fast-uri` and `@hono/node-server` transitive dependencies are pinned to patched versions; no known vulnerabilities remain.
 
 ## Known gaps
 
-- A live Cursor account smoke still requires the owner to run `pnpm bootstrap` and configure the Keychain item.
+- A live Cursor account smoke on a new Mac still requires the owner to run `pnpm bootstrap` and configure the Keychain item.
 - Verification runs in the candidate worktree, not a hermetic rebuilt checkout. Ignored dependency/build artifacts may affect a repository's own verification commands and must be controlled by those commands.
 - A crash during post-delivery cleanup can leave `cleanupStatus: PENDING` after partial local cleanup; the Draft PR and attestation remain authoritative even if the worktree path no longer exists.
 - SSH or HTTPS Git credentials must already work non-interactively from launchd; the supervisor deliberately does not inherit a shell credential environment.

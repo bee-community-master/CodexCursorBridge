@@ -48,6 +48,7 @@ try {
     process.stdout.write(`${JSON.stringify({
       status: "passed",
       model: model.id,
+      modelParams: model.params,
       agentId: agent.agentId,
       runId: run.id,
       sandbox: true,

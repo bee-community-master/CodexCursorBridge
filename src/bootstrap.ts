@@ -98,7 +98,7 @@ async function chooseGrok(apiKey: string): Promise<CursorModelSelection> {
   prompt.close();
   const selected = grok[Number(answer) - 1];
   if (!selected) throw new Error("Invalid Grok model selection");
-  const params = modelParamsForEffort(selected, "high");
+  const params = modelParamsForEffort(selected, "high", { fast: false });
   return chooseConfiguredGrok(grok, selected.id, params);
 }
 
@@ -163,11 +163,10 @@ export async function loadBootstrapConfig(
 ): Promise<ReturnType<typeof emptyMachineConfig>> {
   try {
     const existing = await loadMachineConfig(configFile);
-    const { cursorModelParams: _oldParams, ...rest } = existing;
     return {
-      ...rest,
       cursorModelId: cursorModel.id,
       ...(cursorModel.params ? { cursorModelParams: cursorModel.params } : {}),
+      repositories: existing.repositories,
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

@@ -34,12 +34,12 @@ pnpm bootstrap
 
 - Bridge 빌드
 - Cursor API key를 네이티브 macOS Keychain prompt로 저장(명령 인자·환경 변수로 전달하지 않음)
-- 계정에서 실제 사용 가능한 Grok 모델 선택
+- 계정에서 실제 사용 가능한 Grok 모델 선택 및 `effort=high`, `fast=false` variant 명시적 고정
 - repo-local `cursor-bridge` Codex plugin 설치
 - `~/.codex/config.toml`에 네 개의 좁은 MCP 도구 등록
 - `com.codex-cursor-bridge.supervisor` launchd service 설치
 
-모델·저장소 경로는 `~/.config/codex-cursor-bridge/config.json`, Job DB·로그·보고서·attestation·생성 worktree는 같은 디렉터리 아래에 저장됩니다. Cursor SDK 재개 상태도 그 아래에 저장되며 저장소에는 커밋되지 않습니다.
+모델 ID와 검증된 variant params(`effort=high`, `fast=false`)·저장소 경로는 `~/.config/codex-cursor-bridge/config.json`, Job DB·로그·보고서·attestation·생성 worktree는 같은 디렉터리 아래에 저장됩니다. 기존 model-ID-only 설정도 계속 읽을 수 있으며, 실행 시 라이브 모델 목록에서 high-effort non-fast variant로 승격됩니다. `pnpm bootstrap`을 다시 실행하면 해당 params가 설정에 명시적으로 저장됩니다. Cursor SDK 재개 상태도 같은 디렉터리 아래에 저장되며 저장소에는 커밋되지 않습니다.
 
 ## 대상 저장소 등록
 

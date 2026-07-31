@@ -35,11 +35,21 @@ describe("Cursor model selection", () => {
     expect(() => chooseConfiguredGrok(models, "grok-latest")).toThrow(/unavailable/i);
   });
 
-  it("selects and validates the default high-effort variant", () => {
-    const params = modelParamsForEffort(models[1]!, "high");
+  it("upgrades a legacy model-id-only selection to high non-fast params", () => {
+    expect(chooseConfiguredGrok(models, "grok-4.5")).toEqual({
+      id: "grok-4.5",
+      params: [
+        { id: "effort", value: "high" },
+        { id: "fast", value: "false" },
+      ],
+    });
+  });
+
+  it("selects and validates the non-fast high-effort variant", () => {
+    const params = modelParamsForEffort(models[1]!, "high", { fast: false });
     expect(params).toEqual([
       { id: "effort", value: "high" },
-      { id: "fast", value: "true" },
+      { id: "fast", value: "false" },
     ]);
     expect(chooseConfiguredGrok(models, "grok-4.5", params)).toEqual({
       id: "grok-4.5",
@@ -51,7 +61,21 @@ describe("Cursor model selection", () => {
   });
 
   it("fails closed when the selected Grok model has no requested effort", () => {
-    expect(() => modelParamsForEffort(models[0]!, "high")).toThrow(/high/i);
+    expect(() => modelParamsForEffort(models[0]!, "high", { fast: false })).toThrow(/high/i);
+  });
+
+  it("does not fall back to a fast high-effort variant", () => {
+    expect(() => modelParamsForEffort({
+      id: "grok-fast-only",
+      displayName: "Grok Fast Only",
+      variants: [{
+        params: [
+          { id: "effort", value: "high" },
+          { id: "fast", value: "true" },
+        ],
+        isDefault: true,
+      }],
+    }, "high", { fast: false })).toThrow(/fast=false/i);
   });
 
   it("rejects a configured non-Grok model", () => {

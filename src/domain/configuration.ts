@@ -11,7 +11,7 @@ export interface CursorModelParameter {
 
 export interface MachineConfig {
   cursorModelId: string;
-  cursorModelParams?: CursorModelParameter[];
+  cursorModelParams?: CursorModelParameter[] | undefined;
   repositories: Record<string, RepositoryConfig>;
 }
 

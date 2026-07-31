@@ -60,9 +60,9 @@ beforeEach(() => {
     variants: [{
       params: [
         { id: "effort", value: "high" },
-        { id: "fast", value: "true" },
+        { id: "fast", value: "false" },
       ],
-      displayName: "Grok 4.5 High Fast",
+      displayName: "Grok 4.5 High",
       isDefault: true,
     }],
   }]);
@@ -272,7 +272,7 @@ describe("Cursor implementer adapter", () => {
         id: "grok-4.5",
         params: [
           { id: "effort", value: "high" },
-          { id: "fast", value: "true" },
+          { id: "fast", value: "false" },
         ],
       });
       expect(options.local).toMatchObject({
