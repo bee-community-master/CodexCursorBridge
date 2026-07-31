@@ -107,7 +107,7 @@ export function assertPackageManagerControlArgs(args: readonly string[]): void {
         }
         if (packageManagerValueOptions.has(argument)) {
           const next = args[index + 1];
-          if (next !== "--" && next !== undefined) {
+          if (next !== "--" && next !== undefined && !next.startsWith("-")) {
             index += 1;
           }
           continue;
@@ -124,7 +124,7 @@ export function assertPackageManagerControlArgs(args: readonly string[]): void {
         const attachedValue = shortOptions.slice(shortIndex + 1);
         if (!attachedValue) {
           const next = args[index + 1];
-          if (next !== "--" && next !== undefined) {
+          if (next !== "--" && next !== undefined && !next.startsWith("-")) {
             index += 1;
           }
         }

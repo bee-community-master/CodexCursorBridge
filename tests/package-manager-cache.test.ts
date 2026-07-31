@@ -138,6 +138,8 @@ describe("independent package-manager staging", () => {
     ["-Fcodex-cursor-bridge", "exec", "pnpm", "--version"],
     ["-r", "-C", ".", "-F", "codex-cursor-bridge", "exec", "pnpm", "--version"],
     ["-rC", ".", "-Fcodex-cursor-bridge", "exec", "pnpm", "--version"],
+    ["-C", "-F", "codex-cursor-bridge", "exec", "pnpm", "--version"],
+    ["--dir", "--filter", "codex-cursor-bridge", "exec", "pnpm", "--version"],
     ["--aggregate-output", "exec", "pnpm", "--version"],
     ["--resolution-only", "exec", "pnpm", "--version"],
     ["--loglevel", "debug", "exec", "pnpm", "--version"],
