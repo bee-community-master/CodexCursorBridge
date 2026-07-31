@@ -93,8 +93,9 @@ async function copyReadOnlyCache(
 ): Promise<boolean> {
   const source = packageDirectory(sourceHome, spec);
   if (!await isDirectory(source)) return false;
-  await mkdir(path.dirname(targetHome), { recursive: true, mode: 0o700 });
-  await cp(sourceHome, targetHome, { recursive: true, force: false });
+  const target = packageDirectory(targetHome, spec);
+  await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+  await cp(source, target, { recursive: true, force: false });
   return true;
 }
 
