@@ -55,6 +55,25 @@ MCP SDK, 프로세스 실행기 같은 outbound adapter를 import하지 않는�
 - `src/worker.ts`는 기본 production 조립을 제공하지만 `WorkerDependencies`를 통해
   구성 로더, Task 로더, adapter factory, workflow 실행기를 명시적으로 주입할 수 있다.
 
+## Cursor 실행 복구와 supervisor 경계
+
+- `src/adapters/cursor-runner.ts`는 Attempt에 기록된 `agentId`/`runId`를 먼저
+  읽는다. SDK local store에서 run이 `running`이면 기존 run을 그대로 재연결해
+  모니터링하며, `local.force`로 만료시키거나 follow-up을 만들지 않는다. Attempt에
+  run ID가 없더라도 agent의 active run 목록을 생성 시각과 ID로 결정적으로 정렬해
+  하나를 선택하고, worker lease가 보유한 SQLite transition으로 identity를 원자적으로
+  다시 결속한다. 과거 구현이 남긴 `force_send` terminal marker도 오류 확정으로
+  소비하지 않고 동일 agent의 최신 active run을 먼저 재조정한다.
+- SDK 전송 오류는 task의 `max_repair_attempts`와 별도의 3회 bounded retry를
+  사용한다. 각 재시도 전에 local run 목록으로 이미 수락된 run을 확인하므로
+  ambiguous send가 중복 run을 만들지 않는다. 연결이 끝내 불확실하면
+  `CURSOR_TRANSPORT_UNCERTAIN` 진단을 남기고 Attempt를 active 상태로 보존해 다음
+  supervisor가 lease 만료 후 재조정한다.
+- `src/supervisor.ts`는 claim, heartbeat, workflow 처리의 예외를 프로세스 경계에서
+  흡수하고 250ms부터 최대 30초까지 bounded exponential backoff를 적용한다. 예외가
+  난 Attempt를 임의로 FAILED로 만들지 않으며, `supervisor.log`와 Job log에 전송
+  진단을 남긴 뒤 replacement supervisor가 durable lease를 reclaim할 수 있게 한다.
+
 ## 조립 원칙
 
 - 구체 구현 생성은 `worker`, `supervisor`, `mcp`, `cli` 같은 composition root에서만

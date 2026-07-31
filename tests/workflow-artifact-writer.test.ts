@@ -124,4 +124,58 @@ describe("workflow artifact writer", () => {
     expect(await readFile(attestationPath, "utf8"))
       .not.toContain("attestation-secret-value");
   });
+
+  it("uses an immutable owner-specific report path for reclaimed attempts", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "cursor-owner-reports-"));
+    const writer = new WorkflowArtifactWriter({
+      ...paths,
+      home: directory,
+      reportsDir: path.join(directory, "reports"),
+    });
+    const task = approvedTask({ mode: "new_draft" });
+    const job: Job = {
+      id: "job",
+      repositoryAlias: "demo",
+      taskId: task.id,
+      specVersion: task.spec_version,
+      specHash: task.spec_hash,
+      taskCommitSha: "b".repeat(40),
+      taskBlobSha: "c".repeat(40),
+      targetOrigin: task.target.origin,
+      targetBaseSha: task.target.base_sha,
+      policyVersion: task.policy_version,
+      maxAttempts: 2,
+      status: "IMPLEMENTING",
+      currentAttemptId: "attempt",
+      createdAt: fixedNow,
+      updatedAt: fixedNow,
+    };
+    const oldAttempt = {
+      ...publicationInput().attempts[0]!,
+      workerToken: "old-worker",
+    };
+    const newAttempt = {
+      ...oldAttempt,
+      workerToken: "new-worker",
+    };
+
+    const oldPath = await writer.writeReport({
+      job,
+      task,
+      attempts: [oldAttempt],
+      error: "old uncertainty",
+      reportOwner: { attemptId: "attempt", workerToken: "old-worker" },
+    });
+    const newPath = await writer.writeReport({
+      job,
+      task,
+      attempts: [newAttempt],
+      error: "new final outcome",
+      reportOwner: { attemptId: "attempt", workerToken: "new-worker" },
+    });
+
+    expect(newPath).not.toBe(oldPath);
+    expect(await readFile(oldPath, "utf8")).toContain("old uncertainty");
+    expect(await readFile(newPath, "utf8")).toContain("new final outcome");
+  });
 });

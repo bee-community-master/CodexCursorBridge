@@ -58,6 +58,13 @@ const reclaimableJobStatuses: JobStatus[] = [
   "PUBLISHING",
   "CANCEL_REQUESTED",
 ];
+const reportAttachAttemptStatuses: AttemptStatus[] = [
+  "PREPARING",
+  "IMPLEMENTING",
+  "VERIFYING",
+  "REPAIRING",
+  "PUBLISHING",
+];
 
 function nowIso(now = new Date()): string {
   return now.toISOString();
@@ -575,6 +582,66 @@ export class JobStore implements WorkerStatePort {
     const current = this.get(id);
     if (!current) throw new Error(`Unknown job: ${id}`);
     return this.transitionJob(id, [current.status], next, fields);
+  }
+
+  attachReportIfOwned(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    reportPath: string,
+  ): boolean {
+    const timestamp = nowIso();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const jobPlaceholders = reclaimableJobStatuses.map(() => "?").join(", ");
+      const attemptPlaceholders = reportAttachAttemptStatuses.map(() => "?").join(", ");
+      const result = this.#database.prepare(`
+        UPDATE jobs
+        SET report_path = ?, updated_at = ?
+        WHERE id = ? AND current_attempt_id = ?
+          AND (
+            (
+              status IN (${jobPlaceholders})
+              AND EXISTS (
+                SELECT 1 FROM attempts a
+                WHERE a.id = ? AND a.job_id = ? AND a.worker_token = ?
+                  AND a.status IN (${attemptPlaceholders})
+                  AND a.lease_expires_at > ?
+              )
+            )
+            OR EXISTS (
+              SELECT 1 FROM attempts a
+              WHERE a.id = ? AND a.job_id = ? AND a.worker_token = ?
+                AND (
+                  (jobs.status = 'BLOCKED' AND a.status = 'BLOCKED')
+                  OR (jobs.status = 'FAILED' AND a.status IN ('FAILED', 'FAILED_REPAIRABLE'))
+                  OR (jobs.status = 'CANCELLED' AND a.status = 'CANCELLED')
+                  OR (jobs.status = 'STALE_SPEC' AND a.status = 'FAILED')
+                  OR (jobs.status = 'SCOPE_VIOLATION' AND a.status = 'SCOPE_VIOLATION')
+                )
+            )
+          )
+      `).run(
+        reportPath,
+        timestamp,
+        jobId,
+        attemptId,
+        ...reclaimableJobStatuses,
+        attemptId,
+        jobId,
+        workerToken,
+        ...reportAttachAttemptStatuses,
+        timestamp,
+        attemptId,
+        jobId,
+        workerToken,
+      );
+      this.#database.exec("COMMIT");
+      return result.changes === 1;
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   update(id: string, fields: Partial<Job>): void {

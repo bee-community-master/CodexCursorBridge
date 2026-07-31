@@ -1,6 +1,9 @@
+import { appendFile, chmod, mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { runtimePaths } from "./config.js";
+import type { RuntimePaths } from "./domain/configuration.js";
 import { safeErrorMessage } from "./redaction.js";
 import { JobStore } from "./state.js";
 import { processClaim } from "./worker.js";
@@ -8,16 +11,126 @@ import { processClaim } from "./worker.js";
 const claimLeaseMs = 60_000;
 const heartbeatIntervalMs = 15_000;
 const idlePollMs = 1_000;
+const supervisorBackoffBaseMs = 250;
+const supervisorBackoffCapMs = 30_000;
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+export interface SupervisorLoopOptions {
+  claimLeaseMs?: number;
+  heartbeatIntervalMs?: number;
+  idlePollMs?: number;
+  workerToken?: string;
+  shouldStop?: () => boolean;
+  sleep?: (milliseconds: number) => Promise<void>;
+  processClaim?: typeof processClaim;
+}
+
+export function supervisorBackoffMs(failureStreak: number): number {
+  const exponent = Math.max(0, Math.min(failureStreak - 1, 16));
+  return Math.min(supervisorBackoffCapMs, supervisorBackoffBaseMs * 2 ** exponent);
+}
+
+function delay(milliseconds: number, shouldStop: () => boolean): Promise<void> {
+  if (shouldStop()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const pollMs = Math.min(100, Math.max(1, milliseconds));
+    const timer = setTimeout(finish, milliseconds);
+    const poll = setInterval(() => {
+      if (shouldStop()) finish();
+    }, pollMs);
+    function finish(): void {
+      clearTimeout(timer);
+      clearInterval(poll);
+      resolve();
+    }
+  });
+}
+
+async function logSupervisorFailure(
+  paths: RuntimePaths,
+  phase: "claim" | "heartbeat" | "process",
+  error: unknown,
+): Promise<void> {
+  const message = `[${new Date().toISOString()}] SUPERVISOR_${phase.toUpperCase()}_ERROR ${safeErrorMessage(error)}\n`;
+  const logPath = `${paths.home}/supervisor.log`;
+  try {
+    await mkdir(paths.home, { recursive: true, mode: 0o700 });
+    await appendFile(logPath, message, { encoding: "utf8", mode: 0o600 });
+    await chmod(logPath, 0o600);
+  } catch {
+    // launchd still receives the original diagnostic on stderr if the private
+    // log cannot be written; logging must never kill the recovery loop.
+    process.stderr.write(message);
+  }
+}
+
+/**
+ * Run the durable claim loop. Runtime exceptions are intentionally contained
+ * here: a transient SDK/SQLite/lease error must leave the job reclaimable and
+ * wake the next iteration rather than taking down launchd's process.
+ */
+export async function runSupervisor(
+  store: JobStore,
+  paths: RuntimePaths,
+  options: SupervisorLoopOptions = {},
+): Promise<void> {
+  const leaseMs = options.claimLeaseMs ?? claimLeaseMs;
+  const heartbeatMs = options.heartbeatIntervalMs ?? heartbeatIntervalMs;
+  const idleMs = options.idlePollMs ?? idlePollMs;
+  const shouldStop = options.shouldStop ?? ((): boolean => false);
+  const sleep = options.sleep ?? ((milliseconds: number): Promise<void> =>
+    delay(milliseconds, shouldStop));
+  const processClaimImpl = options.processClaim ?? processClaim;
+  const workerToken = options.workerToken ?? `supervisor:${process.pid}:${randomUUID()}`;
+  let failureStreak = 0;
+
+  while (!shouldStop()) {
+    let claim;
+    try {
+      claim = store.claimNext(workerToken, leaseMs);
+    } catch (error) {
+      failureStreak += 1;
+      await logSupervisorFailure(paths, "claim", error);
+      await sleep(supervisorBackoffMs(failureStreak));
+      continue;
+    }
+    if (!claim) {
+      failureStreak = 0;
+      await sleep(idleMs);
+      continue;
+    }
+
+    const heartbeat = setInterval(() => {
+      try {
+        const currentAttemptId = store.get(claim.job.id)?.currentAttemptId;
+        if (!currentAttemptId) return;
+        store.heartbeat(currentAttemptId, workerToken, leaseMs);
+      } catch (error) {
+        // The workflow will observe a lost lease on its next state transition;
+        // the loop itself remains alive so a replacement supervisor can reclaim.
+        void logSupervisorFailure(paths, "heartbeat", error);
+      }
+    }, heartbeatMs);
+    heartbeat.unref();
+    try {
+      await processClaimImpl(store, claim, paths);
+      failureStreak = 0;
+    } catch (error) {
+      // processClaim normally fences and records workflow failures itself. A
+      // last-resort guard keeps an unexpected adapter/runtime exception from
+      // crashing launchd while the durable lease remains reclaimable.
+      failureStreak += 1;
+      clearInterval(heartbeat);
+      await logSupervisorFailure(paths, "process", error);
+      await sleep(supervisorBackoffMs(failureStreak));
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
 }
 
 async function main(): Promise<void> {
   const paths = runtimePaths();
-  await mkdir(paths.logsDir, { recursive: true, mode: 0o700 });
   const store = new JobStore(paths.databaseFile);
-  const workerToken = `supervisor:${process.pid}:${randomUUID()}`;
   let stopping = false;
   process.once("SIGTERM", () => {
     stopping = true;
@@ -25,36 +138,16 @@ async function main(): Promise<void> {
   process.once("SIGINT", () => {
     stopping = true;
   });
-
   try {
-    while (!stopping) {
-      const claim = store.claimNext(workerToken, claimLeaseMs);
-      if (!claim) {
-        await delay(idlePollMs);
-        continue;
-      }
-      const heartbeat = setInterval(() => {
-        const currentAttemptId = store.get(claim.job.id)?.currentAttemptId;
-        if (!currentAttemptId) return;
-        try {
-          store.heartbeat(currentAttemptId, workerToken, claimLeaseMs);
-        } catch {
-          // The workflow will observe a lost lease on its next state transition.
-        }
-      }, heartbeatIntervalMs);
-      heartbeat.unref();
-      try {
-        await processClaim(store, claim, paths);
-      } finally {
-        clearInterval(heartbeat);
-      }
-    }
+    await runSupervisor(store, paths, { shouldStop: () => stopping });
   } finally {
     store.close();
   }
 }
 
-main().catch((error: unknown) => {
-  process.stderr.write(`${safeErrorMessage(error)}\n`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  main().catch((error: unknown) => {
+    process.stderr.write(`${safeErrorMessage(error)}\n`);
+    process.exitCode = 1;
+  });
+}

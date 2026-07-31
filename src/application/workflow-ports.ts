@@ -79,6 +79,11 @@ export interface AttestationData extends PublicationInput {
   publication: PublicationResult;
 }
 
+export interface ReportOwner {
+  attemptId: string;
+  workerToken: string;
+}
+
 export interface WorkflowReportData {
   job: Job;
   task: ApprovedTask;
@@ -90,6 +95,7 @@ export interface WorkflowReportData {
   cursorSummary?: string;
   publication?: PublicationResult;
   error?: string;
+  reportOwner?: ReportOwner;
 }
 
 export interface WorkflowAdapter {
@@ -174,6 +180,12 @@ export interface WorkflowStatePort extends JobStateReader {
     next: JobStatus,
     fields?: Partial<Job>,
   ): Job;
+  attachReportIfOwned(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    reportPath: string,
+  ): boolean;
   update(id: string, fields: Partial<Job>): void;
   recordEvent(
     jobId: string,
