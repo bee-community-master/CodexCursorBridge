@@ -290,7 +290,7 @@ export async function stagePackageManager(
   }
   const validated = await inspectPackageManagerCache(corepackHome, spec, binary);
   const sourceDigest = `sha256:${await artifactDigest(packageManagerDirectory(corepackHome, spec))}`;
-  const { loadPackageManagerProvenance } = await import("./package-manager-provenance.js");
+  const { loadPackageManagerProvenance } = await import("./package-manager-provenance-loader.js");
   const trusted = await loadPackageManagerProvenance(provenanceFile, spec, binary);
   if (trusted.treeDigest !== sourceDigest || trusted.entrypoint !== validated.entrypoint) {
     throw packageManagerError(
