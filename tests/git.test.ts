@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
   assertGitHubRemote,
+  assertStandaloneCloneIdentity,
   assertWorktreeIdentity,
   captureWorktreeIdentity,
   collectChanges,
@@ -347,7 +348,7 @@ describe("Git change collection", () => {
       "utf8",
     );
     await expect(assertWorktreeIdentity(worktree, identity))
-      .rejects.toThrow(/configuration|metadata|identity/i);
+      .rejects.toThrow("Worktree Git configuration changed after preparation");
     await writeFile(commonConfigFile, commonConfig, "utf8");
 
     const backPointerFile = path.join(identity.gitDir, "gitdir");
@@ -381,6 +382,25 @@ describe("Git change collection", () => {
       .rejects.toThrow(/metadata|identity/i);
   }, 15_000);
 
+  it("requires repo:add targets to be standalone clones", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "cursor-git-standalone-"));
+    const root = path.join(directory, "main");
+    const linked = path.join(directory, "linked");
+    await exec("git", ["init", "-q", root]);
+    await exec("git", ["-C", root, "config", "user.email", "test@example.com"]);
+    await exec("git", ["-C", root, "config", "user.name", "Test"]);
+    await writeFile(path.join(root, "base.ts"), "base\n", "utf8");
+    await exec("git", ["-C", root, "add", "."]);
+    await exec("git", ["-C", root, "commit", "-qm", "base"]);
+    await exec("git", ["-C", root, "worktree", "add", "-qb", "feature", linked]);
+
+    await expect(assertStandaloneCloneIdentity(root)).resolves.toBeUndefined();
+    await expect(assertStandaloneCloneIdentity(linked))
+      .rejects.toThrow(/standalone Git clone|linked worktrees|git-common-dir/i);
+    await expect(assertStandaloneCloneIdentity(linked))
+      .rejects.not.toThrow(directory);
+  }, 15_000);
+
   it("detects changes in an included Git configuration file", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "cursor-git-config-include-"));
     const root = path.join(directory, "main");
@@ -400,6 +420,6 @@ describe("Git change collection", () => {
     await writeFile(includedConfig, "[credential]\n\thelper = second\n", "utf8");
 
     await expect(assertWorktreeIdentity(worktree, identity))
-      .rejects.toThrow(/configuration|metadata|identity/i);
+      .rejects.toThrow("Worktree Git configuration changed after preparation");
   }, 15_000);
 });

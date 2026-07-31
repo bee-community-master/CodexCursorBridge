@@ -235,7 +235,15 @@ describe("task contract", () => {
     })).toThrow(/secret/i);
   });
 
-  it.each(["HOME", "CI", "LANG", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"])(
+  it.each([
+    "HOME",
+    "CI",
+    "LANG",
+    "COREPACK_HOME",
+    "COREPACK_DEFAULT_TO_LATEST",
+    "DYLD_INSERT_LIBRARIES",
+    "LD_PRELOAD",
+  ])(
     "rejects verification overrides for sandbox control variable %s",
     (name) => {
       expect(() => parseTask({

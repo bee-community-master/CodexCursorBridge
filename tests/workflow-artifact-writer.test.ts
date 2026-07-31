@@ -51,12 +51,21 @@ describe("workflow artifact writer", () => {
         status: "failed",
         durationMs: 10,
         output: "failing assertion\napi_key=super-secret-value",
+        packageManager: {
+          name: "pnpm",
+          version: "11.10.0",
+          digest: "sha512.abc123",
+          source: "verifier-owned-corepack-cache",
+          network: "denied",
+        },
       }],
       error: "Verification failed with token: another-secret-value",
     });
     const content = await readFile(report, "utf8");
 
     expect(content).toContain("failing assertion");
+    expect(content).toContain("pnpm@11.10.0 digest=sha512.abc123");
+    expect(content).toContain("network=denied");
     expect(content).not.toContain("super-secret-value");
     expect(content).not.toContain("another-secret-value");
   });
@@ -116,6 +125,13 @@ describe("workflow artifact writer", () => {
         status: "failed",
         durationMs: 10,
         output: "api_key=attestation-secret-value",
+        packageManager: {
+          name: "pnpm",
+          version: "11.10.0",
+          digest: "sha512.attestation",
+          source: "verifier-owned-corepack-cache",
+          network: "denied",
+        },
       }],
     });
 
@@ -123,5 +139,7 @@ describe("workflow artifact writer", () => {
     expect((await stat(attestationPath)).mode & 0o777).toBe(0o600);
     expect(await readFile(attestationPath, "utf8"))
       .not.toContain("attestation-secret-value");
+    expect(await readFile(attestationPath, "utf8"))
+      .toContain("sha512.attestation");
   });
 });

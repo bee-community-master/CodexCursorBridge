@@ -7,6 +7,7 @@ export interface VerificationSandboxInput {
   command: string;
   args: readonly string[];
   taskEnv?: Readonly<Record<string, string>>;
+  corepackHome?: string;
   baseEnv?: NodeJS.ProcessEnv;
 }
 
@@ -137,6 +138,11 @@ export function createVerificationSandbox(input: VerificationSandboxInput): Veri
     CI: "true",
     LANG: baseEnv.LANG ?? "en_US.UTF-8",
     LC_ALL: baseEnv.LC_ALL ?? baseEnv.LANG ?? "en_US.UTF-8",
+    ...(input.corepackHome ? {
+      COREPACK_HOME: path.resolve(input.corepackHome),
+      COREPACK_ENABLE_PROJECT_SPEC: "1",
+      COREPACK_DEFAULT_TO_LATEST: "0",
+    } : {}),
   };
 
   if (process.platform !== "darwin") throw new Error("Verification sandbox requires macOS");

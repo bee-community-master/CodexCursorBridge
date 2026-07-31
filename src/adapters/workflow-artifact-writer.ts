@@ -99,6 +99,12 @@ export class WorkflowArtifactWriter {
       "",
       ...(data.verification?.flatMap((result) => [
         `- ${result.status.toUpperCase()}: \`${result.command}\` (${result.durationMs}ms)`,
+        ...(result.packageManager ? [
+          `    package manager: ${result.packageManager.name}@${result.packageManager.version}`
+            + ` digest=${result.packageManager.digest}`
+            + ` source=${result.packageManager.source}`
+            + ` network=${result.packageManager.network}`,
+        ] : []),
         ...(result.output
           ? redactSensitiveText(result.output).split("\n").map((line) => `    ${line}`)
           : []),

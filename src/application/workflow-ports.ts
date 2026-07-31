@@ -37,6 +37,14 @@ export interface PreparedWorktree {
   gitIdentity?: WorktreeIdentity;
 }
 
+export interface PackageManagerAttestation {
+  name: string;
+  version: string;
+  digest: string;
+  source: "verifier-owned-corepack-cache";
+  network: "denied";
+}
+
 export interface ImplementerOutcome {
   status: "completed" | "blocked" | "needs_input";
   agentId: string;
@@ -53,6 +61,7 @@ export interface VerificationResult {
   status: "passed" | "failed";
   durationMs: number;
   output?: string;
+  packageManager?: PackageManagerAttestation;
 }
 
 export interface PublicationInput {

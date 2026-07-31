@@ -61,6 +61,22 @@ describe("verification sandbox", () => {
     expect(invocation.env).not.toHaveProperty("SSH_AUTH_SOCK");
   });
 
+  it("binds Corepack to the verifier-owned scratch cache", () => {
+    if (process.platform !== "darwin") return;
+    const invocation = createVerificationSandbox({
+      worktree: "/tmp/bridge-worktree",
+      scratchDir: "/tmp/bridge-scratch",
+      command: "pnpm",
+      args: ["test"],
+      taskEnv: { COREPACK_HOME: "/tmp/attacker-cache" },
+      corepackHome: "/tmp/bridge-scratch/corepack",
+    });
+
+    expect(invocation.env.COREPACK_HOME).toBe("/tmp/bridge-scratch/corepack");
+    expect(invocation.env.COREPACK_ENABLE_PROJECT_SPEC).toBe("1");
+    expect(invocation.env.COREPACK_DEFAULT_TO_LATEST).toBe("0");
+  });
+
   it("removes a PATH entry located in the writable worktree even when it resolves outside", async () => {
     if (process.platform !== "darwin") return;
     const directory = await mkdtemp(path.join(tmpdir(), "cursor-sandbox-path-"));

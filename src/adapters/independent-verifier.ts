@@ -10,6 +10,7 @@ import type { ApprovedTask } from "../domain/task.js";
 import { safeErrorMessage } from "../application/redaction.js";
 import { createVerificationSandbox } from "../sandbox.js";
 import { runFile } from "./command-runner.js";
+import { stagePackageManager } from "./package-manager-cache.js";
 import type { PreparedWorktreeGuard } from "./prepared-worktree-guard.js";
 import type { WorkflowLogger } from "./workflow-logger.js";
 
@@ -17,6 +18,10 @@ type VerificationStatePort = Pick<
   PublicationStatePort,
   "isCancellationRequested"
 >;
+
+function usesPnpm(command: string): boolean {
+  return command === "pnpm" || command === "pnpx";
+}
 
 export class IndependentVerifier {
   readonly #paths: RuntimePaths;
@@ -50,20 +55,27 @@ export class IndependentVerifier {
       const scratch = await mkdtemp(path.join(this.#paths.home, "verify-"));
       await mkdir(path.join(scratch, "home"), { recursive: true, mode: 0o700 });
       await mkdir(path.join(scratch, "tmp"), { recursive: true, mode: 0o700 });
-      const invocation = createVerificationSandbox({
-        worktree: prepared.worktree,
-        scratchDir: scratch,
-        command: item.command,
-        args: item.args,
-        ...(item.env ? { taskEnv: item.env } : {}),
-      });
       const started = Date.now();
       const controller = new AbortController();
       const cancellationTimer = setInterval(() => {
         if (this.#store.isCancellationRequested(this.#jobId)) controller.abort();
       }, 250);
       cancellationTimer.unref();
+      let staged: Awaited<ReturnType<typeof stagePackageManager>> | undefined;
       try {
+        staged = usesPnpm(item.command)
+          ? await stagePackageManager(prepared.worktree, scratch)
+          : undefined;
+        const invocation = createVerificationSandbox({
+          worktree: prepared.worktree,
+          scratchDir: scratch,
+          command: item.command,
+          args: item.args,
+          ...(item.env ? { taskEnv: item.env } : {}),
+          ...(staged ? {
+            corepackHome: staged.corepackHome,
+          } : {}),
+        });
         await runFile(invocation.command, invocation.args, {
           cwd: prepared.worktree,
           env: invocation.env,
@@ -75,6 +87,15 @@ export class IndependentVerifier {
           command: [item.command, ...item.args].join(" "),
           status: "passed",
           durationMs: Date.now() - started,
+          ...(staged ? {
+            packageManager: {
+              name: staged.name,
+              version: staged.version,
+              digest: staged.digest,
+              source: staged.source,
+              network: staged.network,
+            },
+          } : {}),
         });
       } catch (error) {
         await this.#logger.log(`Verification failed: ${item.command} ${item.args.join(" ")}`);
@@ -83,6 +104,15 @@ export class IndependentVerifier {
           status: "failed",
           durationMs: Date.now() - started,
           output: safeErrorMessage(error),
+          ...(staged ? {
+            packageManager: {
+              name: staged.name,
+              version: staged.version,
+              digest: staged.digest,
+              source: staged.source,
+              network: staged.network,
+            },
+          } : {}),
         });
         break;
       } finally {

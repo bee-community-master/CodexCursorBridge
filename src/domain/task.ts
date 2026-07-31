@@ -9,6 +9,9 @@ const hashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const gitObjectSchema = z.string().regex(/^[a-f0-9]{40,64}$/);
 const reservedVerificationEnvironment = new Set([
   "CI",
+  "COREPACK_DEFAULT_TO_LATEST",
+  "COREPACK_ENABLE_PROJECT_SPEC",
+  "COREPACK_HOME",
   "HOME",
   "LANG",
   "LC_ALL",

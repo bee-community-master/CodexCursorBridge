@@ -5,6 +5,7 @@ import { bootstrap, uninstall } from "./bootstrap.js";
 import { addRepository, loadMachineConfig, runtimePaths, saveMachineConfig } from "./config.js";
 import {
   assertGitHubRemote,
+  assertStandaloneCloneIdentity,
   computeContextDigest,
   git,
   githubOriginSlug,
@@ -28,6 +29,7 @@ async function addRepo(args: string[]): Promise<void> {
   const alias = option(args, "--alias");
   const root = path.resolve(option(args, "--path"));
   if (await git(root, "rev-parse", "--is-inside-work-tree") !== "true") throw new Error("Path is not a Git repository");
+  await assertStandaloneCloneIdentity(root);
   const originUrl = await git(root, "remote", "get-url", "origin");
   const origin = githubOriginSlug(originUrl);
   await assertGitHubRemote(root, origin);
