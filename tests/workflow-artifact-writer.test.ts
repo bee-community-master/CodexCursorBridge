@@ -48,6 +48,7 @@ describe("workflow artifact writer", () => {
       task: approvedTask({ mode: "new_draft" }),
       verification: [{
         command: "pnpm test",
+        argv: ["/usr/bin/node", "/private/tmp/verify-cache/bin/pnpm.mjs", "test"],
         status: "failed",
         durationMs: 10,
         output: "failing assertion\napi_key=super-secret-value",
@@ -59,6 +60,7 @@ describe("workflow artifact writer", () => {
           artifactDigest: `sha256:${"a".repeat(64)}`,
           runtime: "node",
           entrypoint: "bin/pnpm.mjs",
+          executable: "/private/tmp/verify-cache/bin/pnpm.mjs",
           source: "verifier-owned-corepack-cache",
           network: "denied",
         },
@@ -70,6 +72,7 @@ describe("workflow artifact writer", () => {
     expect(content).toContain("failing assertion");
     expect(content).toContain("pnpm@11.10.0 digest=sha512.abc123");
     expect(content).toContain("network=denied");
+    expect(content).toContain('argv: ["/usr/bin/node","/private/tmp/verify-cache/bin/pnpm.mjs","test"]');
     expect(content).not.toContain("super-secret-value");
     expect(content).not.toContain("another-secret-value");
   });
@@ -137,6 +140,7 @@ describe("workflow artifact writer", () => {
           artifactDigest: `sha256:${"b".repeat(64)}`,
           runtime: "node",
           entrypoint: "bin/pnpm.mjs",
+          executable: "/private/tmp/verify-cache/bin/pnpm.mjs",
           source: "verifier-owned-corepack-cache",
           network: "denied",
         },

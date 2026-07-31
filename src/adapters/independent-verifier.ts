@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import type {
   PreparedWorktree,
@@ -28,28 +28,57 @@ function usesPnpm(command: string): command is PackageManagerBinary {
   return command === "pnpm" || command === "pnpx";
 }
 
-function isPnpmExecutable(value: string | undefined): boolean {
-  if (!value) return false;
-  const normalized = value.replaceAll("\\", "/").split("/").at(-1);
-  return normalized === "pnpm" || normalized === "pnpx";
-}
-
 export function assertPackageManagerControlArgs(args: readonly string[]): void {
+  const valueOptions = new Set([
+    "--dir",
+    "--filter",
+    "--reporter",
+    "--aggregate-output",
+    "--child-concurrency",
+    "--config",
+    "--lockfile-dir",
+    "--network-concurrency",
+    "--package-import-method",
+    "--prefix",
+    "--resolution-only",
+    "--store-dir",
+    "--use-node-version",
+    "--virtual-store-dir",
+    "--workspace-concurrency",
+  ]);
   const settings = new Set<string>();
+  const commandTokens: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
+    if (argument === "--") {
+      commandTokens.push(...args.slice(index + 1));
+      break;
+    }
     if (argument === "--config") {
       const next = args[index + 1];
       if (next) settings.add(next);
-    } else if (argument.startsWith("--config=")) {
+    }
+    if (argument.startsWith("--config=")) {
       settings.add(argument.slice("--config=".length));
     } else if (argument.startsWith("--config.")) {
       settings.add(argument.slice("--config.".length));
+    } else if (argument.startsWith("--pm-on-fail")) {
+      settings.add(argument.replace(/^--/, ""));
+    } else if (
+      argument.startsWith("--package-manager-strict")
+      || argument.startsWith("--manage-package-manager-versions")
+    ) {
+      settings.add(argument.replace(/^--/, ""));
+    }
+    if (!argument.startsWith("-")) {
+      commandTokens.push(argument);
+    } else if (!argument.includes("=") && valueOptions.has(argument)) {
+      index += 1;
     }
   }
   if ([...settings].some((setting) =>
-    /^(?:manage-package-manager-versions|package-manager-strict|package-manager-on-fail|pm-on-fail)(?:=|$)/i
+    /(?:^|\.)(?:manage-package-manager-versions|package-manager-strict|package-manager-on-fail|pm-on-fail)(?:=|$)/i
       .test(setting),
   )) {
     throw new Error(
@@ -57,30 +86,61 @@ export function assertPackageManagerControlArgs(args: readonly string[]): void {
     );
   }
 
-  const commandIndex = args.findIndex((argument) => !argument.startsWith("-"));
-  const subcommand = commandIndex === -1 ? undefined : args[commandIndex];
-  if (subcommand === "self-update" || subcommand === "with") {
+  const dangerousCommands = new Set([
+    "exec",
+    "dlx",
+    "env",
+    "self-update",
+    "setup",
+    "shell",
+    "with",
+  ]);
+  const dangerousCommand = commandTokens.find((token) => dangerousCommands.has(token));
+  if (dangerousCommand) {
     throw new Error(
-      `Independent verifier rejects pnpm ${subcommand}; package-manager switching is not attestable`,
+      `Independent verifier rejects pnpm ${dangerousCommand}; nested package-manager execution is not attestable`,
     );
-  }
-  if (subcommand === "exec" || subcommand === "dlx") {
-    const target = args.slice(commandIndex + 1).find((argument) => !argument.startsWith("-"));
-    if (isPnpmExecutable(target)) {
-      throw new Error(
-        "Independent verifier rejects pnpm exec/dlx of another package-manager binary",
-      );
-    }
   }
 }
 
 export function assertPackageManagerEnvironment(env: Readonly<Record<string, string>> | undefined): void {
-  const controlNames = Object.keys(env ?? {}).filter((name) => /^COREPACK_/.test(name));
+  const controlNames = Object.keys(env ?? {}).filter((name) =>
+    /^COREPACK_/.test(name)
+    || /^(?:NPM|PNPM)_CONFIG_(?:MANAGE_PACKAGE_MANAGER_VERSIONS|PACKAGE_MANAGER_STRICT|PM_ON_FAIL)$/.test(name),
+  );
   if (controlNames.length > 0) {
     throw new Error(
       `Independent verifier rejects COREPACK_* task environment overrides: ${controlNames.join(", ")}`,
     );
   }
+}
+
+async function findWorkspacePackageManagerBinaries(root: string): Promise<string[]> {
+  const binaries: string[] = [];
+  async function visit(directory: string): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const child = path.join(directory, entry.name);
+      if (entry.name === "node_modules" && (entry.isDirectory() || entry.isSymbolicLink())) {
+        const binDirectory = path.join(child, ".bin");
+        for (const binary of ["pnpm", "pnpx", "corepack"]) {
+          const candidate = path.join(binDirectory, binary);
+          try {
+            await lstat(candidate);
+            binaries.push(candidate);
+          } catch (error) {
+            // A workspace may not have every package-manager binary.
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          }
+        }
+        continue;
+      }
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (entry.name !== ".git") await visit(child);
+    }
+  }
+  await visit(path.resolve(root));
+  return binaries;
 }
 
 export class IndependentVerifier {
@@ -130,12 +190,18 @@ export class IndependentVerifier {
           assertPackageManagerControlArgs(item.args);
         }
         staged = usesPnpm(item.command)
-          ? await stagePackageManager(prepared.worktree, cacheRoot, item.command)
+          ? await stagePackageManager(
+            prepared.worktree,
+            cacheRoot,
+            path.join(this.#paths.home, "package-manager-provenance.json"),
+            item.command,
+          )
           : undefined;
         if (staged) await assertStagedPackageManager(staged);
         const command = staged ? process.execPath : item.command;
         const args = staged ? [staged.executable, ...item.args] : item.args;
-        const attestedCommand = [command, ...args].join(" ");
+        const argv = [command, ...args];
+        const attestedCommand = argv.join(" ");
         const invocation = createVerificationSandbox({
           worktree: prepared.worktree,
           scratchDir: scratch,
@@ -146,6 +212,7 @@ export class IndependentVerifier {
             corepackHome: staged.corepackHome,
             readOnlyRoots: [staged.corepackHome],
             pathPrefix: [path.dirname(staged.executable), path.dirname(process.execPath)],
+            blockedProcessPaths: await findWorkspacePackageManagerBinaries(prepared.worktree),
           } : {}),
         });
         invocationStarted = true;
@@ -158,6 +225,7 @@ export class IndependentVerifier {
         await this.#logger.log(`Verification passed: ${attestedCommand}`);
         results.push({
           command: attestedCommand,
+          argv,
           status: "passed",
           durationMs: Date.now() - started,
           ...(staged && invocationStarted ? {
@@ -170,6 +238,7 @@ export class IndependentVerifier {
               artifactDigest: staged.artifactDigest,
               runtime: "node",
               entrypoint: staged.entrypoint,
+              executable: staged.executable,
               source: staged.source,
               network: staged.network,
             },
@@ -179,9 +248,13 @@ export class IndependentVerifier {
         const failedCommand = staged
           ? `${process.execPath} ${staged.executable} ${item.args.join(" ")}`.trim()
           : [item.command, ...item.args].join(" ");
+        const failedArgv = staged
+          ? [process.execPath, staged.executable, ...item.args]
+          : [item.command, ...item.args];
         await this.#logger.log(`Verification failed: ${failedCommand}`);
         results.push({
           command: failedCommand,
+          argv: failedArgv,
           status: "failed",
           durationMs: Date.now() - started,
           output: safeErrorMessage(error),
@@ -195,6 +268,7 @@ export class IndependentVerifier {
               artifactDigest: staged.artifactDigest,
               runtime: "node",
               entrypoint: staged.entrypoint,
+              executable: staged.executable,
               source: staged.source,
               network: staged.network,
             },

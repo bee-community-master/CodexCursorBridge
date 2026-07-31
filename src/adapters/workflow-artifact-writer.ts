@@ -99,6 +99,7 @@ export class WorkflowArtifactWriter {
       "",
       ...(data.verification?.flatMap((result) => [
         `- ${result.status.toUpperCase()}: \`${result.command}\` (${result.durationMs}ms)`,
+        ...(result.argv ? [`    argv: ${JSON.stringify(result.argv)}`] : []),
         ...(result.packageManager ? [
           `    package manager: ${result.packageManager.name}@${result.packageManager.version}`
             + ` digest=${result.packageManager.digest}`
@@ -107,7 +108,8 @@ export class WorkflowArtifactWriter {
             + ` binary=${result.packageManager.binary}`
             + ` artifactDigest=${result.packageManager.artifactDigest}`
             + ` runtime=${result.packageManager.runtime}`
-            + ` entrypoint=${result.packageManager.entrypoint}`,
+            + ` entrypoint=${result.packageManager.entrypoint}`
+            + ` executable=${result.packageManager.executable}`,
         ] : []),
         ...(result.output
           ? redactSensitiveText(result.output).split("\n").map((line) => `    ${line}`)

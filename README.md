@@ -53,8 +53,17 @@ pnpm repo:add -- --alias my-service --path /absolute/path/to/my-service
 
 독립 검증은 host Corepack cache의 정확한 package-manager artifact만 verifier 전용 cache root로
 복사해 read-only로 고정하고, writable scratch와 분리합니다. cache가 없으면 검증이 실패하며
-verifier가 registry에 연결해 몰래 설치하지 않습니다. dispatch 전에 운영자가
-`corepack pack pnpm@<packageManager 버전>` 같은 명시적 provisioning을 수행해야 합니다.
+verifier가 registry에 연결해 몰래 설치하지 않습니다. 먼저 운영자가 `corepack pack
+pnpm@<packageManager 버전>`으로 artifact를 준비한 뒤 Bridge-owned manifest를 명시적으로
+생성해야 합니다.
+
+```bash
+pnpm package-manager:provision -- --version 11.10.0 --binary pnpm
+```
+
+manifest는 runtime home의 owner-only 파일이며, 이후 검증은 manifest의 version, entrypoint,
+tree digest와 host cache를 대조합니다. host cache를 변경한 뒤 manifest를 다시 생성하지 않으면
+검증은 fail closed 합니다.
 
 ## Task 작성과 승인
 

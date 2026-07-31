@@ -80,18 +80,18 @@ export async function readPackageManager(worktree: string): Promise<PackageManag
   };
 }
 
-function defaultCorepackHome(): string {
+export function hostCorepackHome(): string {
   const cacheRoot = process.env.XDG_CACHE_HOME
     ?? path.join(os.homedir(), ".cache");
   return process.env.COREPACK_HOME
     ?? path.join(cacheRoot, "node", "corepack");
 }
 
-function packageDirectory(corepackHome: string, spec: PackageManagerSpec): string {
+export function packageManagerDirectory(corepackHome: string, spec: PackageManagerSpec): string {
   return path.join(corepackHome, "v1", spec.name, spec.version);
 }
 
-interface ValidatedPackageManager {
+export interface ValidatedPackageManager {
   digest: string;
   executable: string;
   entrypoint: string;
@@ -112,35 +112,35 @@ async function copyReadOnlyCache(
   targetHome: string,
   spec: PackageManagerSpec,
 ): Promise<boolean> {
-  const source = packageDirectory(sourceHome, spec);
+  const source = packageManagerDirectory(sourceHome, spec);
   if (!await isDirectory(source)) return false;
-  await assertArtifactTree(source);
-  const target = packageDirectory(targetHome, spec);
+  await assertPackageManagerArtifactTree(source);
+  const target = packageManagerDirectory(targetHome, spec);
   await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
   await cp(source, target, { recursive: true, force: false });
   return true;
 }
 
-async function assertArtifactTree(root: string): Promise<void> {
+export async function assertPackageManagerArtifactTree(root: string): Promise<void> {
   const entries = await readdir(root, { withFileTypes: true });
   for (const entry of entries) {
     const child = path.join(root, entry.name);
     if (entry.isSymbolicLink()) {
       throw new Error("Independent verifier package cache may not contain symbolic links");
     }
-    if (entry.isDirectory()) await assertArtifactTree(child);
+    if (entry.isDirectory()) await assertPackageManagerArtifactTree(child);
     else if (!entry.isFile()) {
       throw new Error("Independent verifier package cache contains an unsupported entry");
     }
   }
 }
 
-async function assertPackageManagerCache(
+export async function inspectPackageManagerCache(
   corepackHome: string,
   spec: PackageManagerSpec,
   binary: "pnpm" | "pnpx",
 ): Promise<ValidatedPackageManager> {
-  const directory = packageDirectory(corepackHome, spec);
+  const directory = packageManagerDirectory(corepackHome, spec);
   try {
     const metadata = JSON.parse(
       await readFile(path.join(directory, ".corepack"), "utf8"),
@@ -213,6 +213,10 @@ async function artifactDigest(root: string, relative = ""): Promise<string> {
   return hash.digest("hex");
 }
 
+export async function computePackageManagerArtifactDigest(root: string): Promise<string> {
+  return artifactDigest(root);
+}
+
 async function makeReadOnly(root: string): Promise<void> {
   const entries = await readdir(root, { withFileTypes: true });
   for (const entry of entries) {
@@ -270,22 +274,32 @@ async function assertEntrypointShim(
 export async function stagePackageManager(
   worktree: string,
   scratchDir: string,
+  provenanceFile: string,
   binary: "pnpm" | "pnpx" = "pnpm",
 ): Promise<StagedPackageManager> {
   const spec = await readPackageManager(worktree);
   const corepackHome = path.join(scratchDir, "corepack");
   await mkdir(corepackHome, { recursive: true, mode: 0o700 });
 
-  const copied = await copyReadOnlyCache(defaultCorepackHome(), corepackHome, spec);
+  const copied = await copyReadOnlyCache(hostCorepackHome(), corepackHome, spec);
   if (!copied) {
     throw packageManagerError(
       spec.version,
       "pre-provision the exact package in the host Corepack cache before dispatch",
     );
   }
-  const validated = await assertPackageManagerCache(corepackHome, spec, binary);
+  const validated = await inspectPackageManagerCache(corepackHome, spec, binary);
+  const sourceDigest = `sha256:${await artifactDigest(packageManagerDirectory(corepackHome, spec))}`;
+  const { loadPackageManagerProvenance } = await import("./package-manager-provenance.js");
+  const trusted = await loadPackageManagerProvenance(provenanceFile, spec, binary);
+  if (trusted.treeDigest !== sourceDigest || trusted.entrypoint !== validated.entrypoint) {
+    throw packageManagerError(
+      spec.version,
+      "the staged package does not match the explicitly provisioned artifact digest",
+    );
+  }
   await addEntrypointShim(validated.executable, binary, spec.version);
-  const digest = await artifactDigest(packageDirectory(corepackHome, spec));
+  const digest = await artifactDigest(packageManagerDirectory(corepackHome, spec));
   await makeReadOnly(corepackHome);
   return {
     name: spec.name,
@@ -311,10 +325,10 @@ export async function assertStagedPackageManager(
     reference: `${staged.name}@${staged.version}`,
     ...(staged.integrity ? { integrity: staged.integrity } : {}),
   };
-  const validated = await assertPackageManagerCache(staged.corepackHome, spec, staged.binary);
+  const validated = await inspectPackageManagerCache(staged.corepackHome, spec, staged.binary);
   await assertEntrypointShim(validated.executable, staged.binary, staged.version);
   const actualArtifactDigest = `sha256:${await artifactDigest(
-    packageDirectory(staged.corepackHome, spec),
+    packageManagerDirectory(staged.corepackHome, spec),
   )}`;
   if (
     validated.digest !== staged.digest

@@ -10,6 +10,7 @@ export interface VerificationSandboxInput {
   corepackHome?: string;
   readOnlyRoots?: readonly string[];
   pathPrefix?: readonly string[];
+  blockedProcessPaths?: readonly string[];
   baseEnv?: NodeJS.ProcessEnv;
 }
 
@@ -110,12 +111,14 @@ function profile(
   worktree: string,
   scratchDir: string,
   readOnlyRootsInput: readonly string[],
+  blockedProcessPaths: readonly string[],
 ): string {
   const writableRoots = [...new Set([
     ...pathVariants(worktree),
     ...pathVariants(scratchDir),
   ])];
   const readOnlyRoots = [...new Set(readOnlyRootsInput.flatMap(pathVariants))];
+  const blockedProcesses = [...new Set(blockedProcessPaths.flatMap(pathVariants))];
   const reads = [
     ...readableRoots(worktree, scratchDir, readOnlyRoots)
       .map((root) => `(subpath ${sandboxLiteral(root)})`),
@@ -132,6 +135,7 @@ function profile(
     "(allow sysctl-read)",
     "(allow mach-lookup)",
     '(deny mach-lookup (global-name "com.apple.securityd") (global-name "com.apple.securityd.system"))',
+    ...blockedProcesses.map((root) => `(deny process-exec (subpath ${sandboxLiteral(root)}))`),
     `(allow file-read* ${reads})`,
     `(allow file-write* ${writes} (literal "/dev/null"))`,
     "(deny network*)",
@@ -166,7 +170,7 @@ export function createVerificationSandbox(input: VerificationSandboxInput): Veri
     command: "/usr/bin/sandbox-exec",
     args: [
       "-p",
-      profile(worktree, scratchDir, input.readOnlyRoots ?? []),
+      profile(worktree, scratchDir, input.readOnlyRoots ?? [], input.blockedProcessPaths ?? []),
       input.command,
       ...input.args,
     ],

@@ -15,6 +15,7 @@ import { readCursorApiKey } from "./keychain.js";
 import { safeErrorMessage } from "./redaction.js";
 import { JobStore } from "./state.js";
 import { approveTaskFile, loadTaskFile } from "./task.js";
+import { provisionPackageManagerManifest } from "./adapters/package-manager-provenance.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -107,6 +108,22 @@ async function approve(args: string[]): Promise<void> {
   process.stdout.write(`${task.id} approved at v${task.spec_version}: ${task.spec_hash}\nCommit this Task file before dispatch.\n`);
 }
 
+async function provisionPackageManager(args: string[]): Promise<void> {
+  const version = option(args, "--version");
+  const binary = args.includes("--binary")
+    ? option(args, "--binary")
+    : "pnpm";
+  if (binary !== "pnpm" && binary !== "pnpx") {
+    throw new Error("Package-manager binary must be pnpm or pnpx");
+  }
+  const paths = runtimePaths(projectRoot);
+  const file = path.join(paths.home, "package-manager-provenance.json");
+  const record = await provisionPackageManagerManifest(file, version, binary);
+  process.stdout.write(
+    `Provisioned ${record.name}@${record.version} (${record.binary}) in ${file}\n`,
+  );
+}
+
 async function listModels(): Promise<void> {
   const apiKey = await readCursorApiKey();
   const models = await Cursor.models.list({ apiKey });
@@ -130,9 +147,10 @@ async function main(): Promise<void> {
     case "uninstall": await uninstall(projectRoot, args.includes("--delete-key")); break;
     case "repo:add": await addRepo(args); break;
     case "task:approve": await approve(args); break;
+    case "package-manager:provision": await provisionPackageManager(args); break;
     case "models:list": await listModels(); break;
     case "stats": printStats(); break;
-    default: throw new Error("Usage: cli.ts <bootstrap|uninstall|repo:add|task:approve|models:list|stats>");
+    default: throw new Error("Usage: cli.ts <bootstrap|uninstall|repo:add|task:approve|package-manager:provision|models:list|stats>");
   }
 }
 

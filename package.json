@@ -18,6 +18,7 @@
     "uninstall": "tsx src/cli.ts uninstall",
     "repo:add": "tsx src/cli.ts repo:add",
     "task:approve": "tsx src/cli.ts task:approve",
+    "package-manager:provision": "tsx src/cli.ts package-manager:provision",
     "models:list": "tsx src/cli.ts models:list",
     "stats": "tsx src/cli.ts stats",
     "smoke:mcp": "node dist/smoke-mcp.js",

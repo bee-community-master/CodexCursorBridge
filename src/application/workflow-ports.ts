@@ -46,6 +46,7 @@ export interface PackageManagerAttestation {
   artifactDigest: string;
   runtime: "node";
   entrypoint: string;
+  executable: string;
   source: "verifier-owned-corepack-cache";
   network: "denied";
 }
@@ -63,6 +64,7 @@ export interface ImplementerOutcome {
 
 export interface VerificationResult {
   command: string;
+  argv?: string[];
   status: "passed" | "failed";
   durationMs: number;
   output?: string;

@@ -51,6 +51,7 @@ const safeVerificationEnv = z.record(z.string().regex(/^[A-Z][A-Z0-9_]*$/), z.st
     const reservedNames = Object.keys(env).filter((name) =>
       reservedVerificationEnvironment.has(name)
       || /^COREPACK_/.test(name)
+      || /^(?:NPM|PNPM)_CONFIG_(?:MANAGE_PACKAGE_MANAGER_VERSIONS|PACKAGE_MANAGER_STRICT|PM_ON_FAIL)$/.test(name)
       || /^(?:DYLD|LD)_/.test(name),
     );
     if (reservedNames.length > 0) {
