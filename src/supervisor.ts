@@ -26,6 +26,13 @@ export interface SupervisorLoopOptions {
   processClaim?: typeof processClaim;
 }
 
+export class SupervisorShutdownError extends Error {
+  constructor() {
+    super("Supervisor shutdown requires the top-level owner to exit after cleanup.");
+    this.name = "SupervisorShutdownError";
+  }
+}
+
 export function supervisorBackoffMs(failureStreak: number): number {
   const exponent = Math.max(0, Math.min(failureStreak - 1, 16));
   return Math.min(supervisorBackoffCapMs, supervisorBackoffBaseMs * 2 ** exponent);
@@ -103,12 +110,13 @@ export async function runSupervisor(
   const heartbeatMs = options.heartbeatIntervalMs ?? heartbeatIntervalMs;
   const idleMs = options.idlePollMs ?? idlePollMs;
   const shouldStop = options.shouldStop ?? ((): boolean => false);
-  const sleep = options.sleep ?? ((milliseconds: number): Promise<void> =>
-    delay(milliseconds, shouldStop));
   const processClaimImpl = options.processClaim ?? processClaim;
   const workerToken = options.workerToken ?? `supervisor:${process.pid}:${randomUUID()}`;
   let failureStreak = 0;
   let signalRequested = false;
+  const stopRequested = (): boolean => shouldStop() || signalRequested;
+  const sleep = options.sleep ?? ((milliseconds: number): Promise<void> =>
+    delay(milliseconds, stopRequested));
   const signalHandler = (): void => {
     signalRequested = true;
   };
@@ -116,7 +124,7 @@ export async function runSupervisor(
   process.once("SIGINT", signalHandler);
 
   try {
-    while (!shouldStop()) {
+    while (!stopRequested()) {
     let claim;
     try {
       claim = store.claimNext(workerToken, leaseMs);
@@ -143,7 +151,7 @@ export async function runSupervisor(
         void logSupervisorFailure(paths, "heartbeat", error);
       }
     }, heartbeatMs);
-    const shutdown = watchForShutdown(shouldStop);
+    const shutdown = watchForShutdown(stopRequested);
     const processPromise = Promise.resolve().then(() => processClaimImpl(store, claim, paths));
     let processSettled = false;
     processPromise.finally(() => {
@@ -164,12 +172,13 @@ export async function runSupervisor(
           processPromise.then(() => undefined, () => undefined),
           delay(shutdownGraceMs, () => false),
         ]);
-        if (!processSettled && signalRequested) process.exit(0);
+        if (!processSettled && signalRequested) throw new SupervisorShutdownError();
         continue;
       }
       if (result.kind === "failed") throw result.error;
       failureStreak = 0;
     } catch (error) {
+      if (error instanceof SupervisorShutdownError) throw error;
       // processClaim normally fences and records workflow failures itself. A
       // last-resort guard keeps an unexpected adapter/runtime exception from
       // crashing launchd while the durable lease remains reclaimable.
@@ -192,6 +201,7 @@ async function main(): Promise<void> {
   const paths = runtimePaths();
   const store = new JobStore(paths.databaseFile);
   let stopping = false;
+  let forceExit = false;
   process.once("SIGTERM", () => {
     stopping = true;
   });
@@ -200,9 +210,13 @@ async function main(): Promise<void> {
   });
   try {
     await runSupervisor(store, paths, { shouldStop: () => stopping });
+  } catch (error) {
+    if (error instanceof SupervisorShutdownError) forceExit = true;
+    else throw error;
   } finally {
     store.close();
   }
+  if (forceExit) process.exit(0);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

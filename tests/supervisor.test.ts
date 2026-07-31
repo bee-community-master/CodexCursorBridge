@@ -28,13 +28,13 @@ function runtimePaths(root: string): RuntimePaths {
 
 async function runPendingClaimShutdownChild(
   signal: "SIGTERM" | "SIGINT",
-): Promise<{ code: number | null; signal: NodeJS.Signals | null; elapsedMs: number; stderr: string; root: string }> {
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; elapsedMs: number; stderr: string; stdout: string; root: string }> {
   const script = `
     import { mkdtemp } from "node:fs/promises";
     import os from "node:os";
     import path from "node:path";
     const { JobStore } = await import("./src/state.ts");
-    const { runSupervisor } = await import("./src/supervisor.ts");
+    const { runSupervisor, SupervisorShutdownError } = await import("./src/supervisor.ts");
     const root = await mkdtemp(path.join(os.tmpdir(), "cursor-supervisor-shutdown-"));
     const store = new JobStore(path.join(root, "jobs.sqlite"));
     store.createOrGet({
@@ -43,8 +43,6 @@ async function runPendingClaimShutdownChild(
       targetOrigin: "owner/demo", targetBaseSha: "c".repeat(40),
       policyVersion: 2, maxAttempts: 1,
     });
-    let stopping = false;
-    process.once(${JSON.stringify(signal)}, () => { stopping = true; });
     const independentHandle = setInterval(() => undefined, 1_000);
     void independentHandle;
     const paths = {
@@ -53,16 +51,25 @@ async function runPendingClaimShutdownChild(
       reportsDir: path.join(root, "reports"), worktreesDir: path.join(root, "worktrees"),
       tasksDir: path.join(root, "tasks"),
     };
-    runSupervisor(store, paths, {
-      workerToken: "shutdown-worker",
-      claimLeaseMs: 100,
-      heartbeatIntervalMs: 20,
-      shouldStop: () => stopping,
-      processClaim: async () => {
-        process.stdout.write("READY " + root + "\\n");
-        await new Promise(() => undefined);
-      },
-    }).catch(() => undefined);
+    let forceExit = false;
+    try {
+      await runSupervisor(store, paths, {
+        workerToken: "shutdown-worker",
+        claimLeaseMs: 100,
+        heartbeatIntervalMs: 20,
+        processClaim: async () => {
+          process.stdout.write("READY " + root + "\\n");
+          await new Promise(() => undefined);
+        },
+      });
+    } catch (error) {
+      if (error instanceof SupervisorShutdownError) forceExit = true;
+      else throw error;
+    } finally {
+      store.close();
+      process.stdout.write("CLEANUP\\n");
+    }
+    if (forceExit) process.exit(0);
   `;
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
     cwd: process.cwd(),
@@ -94,7 +101,7 @@ async function runPendingClaimShutdownChild(
     });
     child.once("exit", (code, childSignal) => {
       clearTimeout(timeout);
-      resolve({ code, signal: childSignal, elapsedMs: Date.now() - startedAt, stderr, root });
+      resolve({ code, signal: childSignal, elapsedMs: Date.now() - startedAt, stderr, stdout, root });
     });
   });
 }
@@ -108,6 +115,7 @@ describe("durable supervisor recovery", () => {
         signal: null,
       });
       expect(result.elapsedMs).toBeLessThan(1_500);
+      expect(result.stdout).toContain("CLEANUP");
       const replacement = new JobStore(path.join(result.root, "jobs.sqlite"));
       stores.push(replacement);
       const reclaimed = replacement.claimNext("replacement-worker", 60_000);
