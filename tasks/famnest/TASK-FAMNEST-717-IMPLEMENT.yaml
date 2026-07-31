@@ -1,0 +1,244 @@
+id: TASK-FAMNEST-717-IMPLEMENT
+repository: famnest
+title: Implement DecisionCard choice, quorum, resolution, and atomic materialization contracts
+spec_version: 1
+goal: "Implement issue #717 end to end on top of the existing FamilyOperation contract, including
+  the DecisionCard ledger, role-safe projections, revisioned response and resolution APIs, protected
+  effect approval, atomic task/handoff materialization, persistence, generated contracts, and
+  Web/iOS/Android clients without weakening existing family authorization or audit boundaries."
+context_files:
+  - AGENTS.md
+  - docs/operations/build-contract.md
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - docs/engineering/backend-architecture.md
+  - docs/engineering/web-architecture.md
+  - docs/engineering/android-architecture.md
+  - docs/engineering/ios-architecture.md
+  - packages/shared-types/openapi/famnest-api.json
+  - services/backend/src/famnest_backend/api/v1/operations.py
+  - services/backend/src/famnest_backend/application/operations.py
+  - services/backend/src/famnest_backend/application/dto/operation_models.py
+  - services/backend/src/famnest_backend/application/ports/operation_repository.py
+  - services/backend/src/famnest_backend/repositories/operations_adapters.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/operations/models.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/operations/lifecycle_services.py
+  - services/backend/tests/test_family_operation_v15_contract.py
+  - services/backend/tests/test_family_operations.py
+  - services/backend/tests/test_operations.py
+  - services/backend/tests/test_task_assignment_lifecycle.py
+  - supabase/migrations/20260502010000_family_operations.sql
+  - supabase/migrations/20260719090000_task_assignment_handoff.sql
+  - apps/web/src/lib/famnest/features/operations/operationsApiRepository.ts
+  - apps/web/src/lib/famnest/features/operations/operationsModels.ts
+  - apps/web/src/lib/famnest/features/operations/operationsUseCases.ts
+  - apps/web/src/lib/famnest/features/operations/operationsUseCases.test.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOperationsApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/operations/FamilyOperationApi.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/operations/FamilyOperationApiTest.kt
+  - apps/ios/Sources/FamNestIOSCore/API/APIFamilyOperationModels.swift
+  - apps/ios/Sources/FamNestIOSCore/API/APIFamilyTaskModels.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/APIFamilyOperationContractTests.swift
+allowed_paths:
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/**
+  - services/backend/src/famnest_backend/api/v1/operations.py
+  - services/backend/src/famnest_backend/api/v1/tasks.py
+  - services/backend/src/famnest_backend/application/operations.py
+  - services/backend/src/famnest_backend/application/dto/operation*.py
+  - services/backend/src/famnest_backend/application/dto/task*.py
+  - services/backend/src/famnest_backend/application/ports/operation*.py
+  - services/backend/src/famnest_backend/application/ports/task*.py
+  - services/backend/src/famnest_backend/domain/operations/**
+  - services/backend/src/famnest_backend/domain/tasks/**
+  - services/backend/src/famnest_backend/repositories/operations*.py
+  - services/backend/src/famnest_backend/repositories/task*.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/operations/**
+  - services/backend/src/famnest_backend/repositories/domain_runtime/task/**
+  - services/backend/tests/**operation**
+  - services/backend/tests/**task**
+  - services/backend/tests/test_family_operation_v15_contract.py
+  - services/backend/tests/test_family_operations.py
+  - services/backend/tests/test_task_assignment_lifecycle.py
+  - services/backend/tests/test_operations.py
+  - supabase/migrations/**
+  - apps/web/src/lib/api/generated/**
+  - apps/web/src/lib/famnest/features/operations/**
+  - apps/web/src/lib/famnest/features/tasks/**
+  - apps/web/src/routes/families/**
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/**
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOperationsApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/operations/**
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/tasks/**
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/operations/**
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/tasks/**
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/**
+  - apps/android/presentation/src/test/java/com/elevife/famnest/android/ui/**
+  - apps/ios/Sources/FamNestIOSCore/API/API*Operation*.swift
+  - apps/ios/Sources/FamNestIOSCore/API/API*Task*.swift
+  - apps/ios/Sources/FamNestIOSCore/**
+  - apps/ios/Sources/FamNestIOSApp/AppShell/FamilyOperationSettings/**
+  - apps/ios/Sources/FamNestIOSApp/AppShell/CalendarTask/**
+  - apps/ios/Sources/FamNestIOSApp/Features/CalendarTask/**
+  - apps/ios/Sources/FamNestIOSApp/Features/Home/Tasks/**
+  - apps/ios/Tests/**
+forbidden_paths:
+  - .env
+  - .env.*
+  - "**/.env"
+  - "**/.env.*"
+  - "**/credentials/**"
+  - "**/secrets/**"
+  - artifacts/private/**
+  - scripts/release/**
+  - scripts/deploy/**
+  - deployment/**
+  - "**/deployment/**"
+  - infra/**
+  - "**/production/**"
+  - supabase/config.toml
+  - "**/google-services.json"
+  - "**/GoogleService-Info.plist"
+non_goals:
+  - Do not change unrelated FamilyOperation behavior or existing operation contracts outside the
+    DecisionCard scope of this task.
+  - Do not add AI auto-selection or auto-response, anonymous voting, chat, weighted quorum, or
+    automatic payment, external messaging, calendar write, assignee change, or protected effect.
+  - Do not treat a child DecisionCard result as parent consent; protected effects require a separate
+    parent approval resource and source lineage.
+  - Do not weaken existing family membership, role, resource ACL, RLS, privacy, idempotency,
+    revision, retention, or opaque push contracts.
+  - Do not claim production migration execution, live notification deliverability, provider
+    behavior, device/store readiness, or product impact from repository tests.
+  - Do not modify credentials, deployment configuration, production resources, or external consoles.
+acceptance_criteria:
+  - The persisted DecisionCard requires question, creator, a visible decision-maker roster, affected
+    members or children, two to four stable-ID options, an exact local deadline, decision_policy,
+    and no_response_behavior; option effects include bounded schedule, cost, role, and task/handoff
+    previews, with cost band none/free/low/medium/high/unknown and optional parent-only exact minor
+    currency amount.
+  - single_decider accepts exactly one decider, unanimous resolves only when every active roster
+    member selects the same option, and majority requires strictly more than half of the roster;
+    ties and simple plurality remain unresolved. Non-parent creators include themselves and may add
+    only members visible in the Operation projection. Membership loss invalidates the response with
+    an audit event but does not recompute the quorum denominator or undo an already-resolved card.
+  - Responses are self-owned and replaceable or withdrawable only by that decider before resolve;
+    in-progress projections reveal response presence but not other choices, and resolved ACL-safe
+    projections reveal only the selected option and aggregate counts while self and parent-audit
+    projections retain individual choices. Child sole-decision behavior cannot materialize protected
+    schedule, assignment, sharing, sensitivity, spending, medical, or external-transfer effects.
+  - The final valid response performs immediate resolve and materialization in one transaction;
+    materialization_state is one of not_required, pending_parent_approval, applied, declined,
+    blocked, or undone, and pending parent approval points Operation next_action to the approval
+    resource without pre-applying the protected effect. Resolution safety failure preserves the
+    response and returns resolution_blocked with current blocker, effect preview, revisions, and
+    parent review CTA without creating partial resources.
+  - Deadlines persist local_date, local_time, timezone, and the resolved UTC instant. DST gaps or
+    ambiguous folds return 422 without arbitrary correction, later family-timezone changes do not
+    move the stored instant, no_response_behavior defaults to no_change, overdue_grace permits
+    exactly 24 hours of new or replacement responses, remind_once observes quiet hours once, and
+    escalate_to_parent_review creates only a review item. Parent extension preserves valid
+    responses.
+  - Pre-resolution cancel requires a typed reason and expected revision from an eligible decider;
+    creator or parent may reopen a canceled card as a new revision with all responses recollected.
+    Resolve undo has no generic 24-hour limit and succeeds only when every materialized resource is
+    untouched, incomplete, unassigned, untransmitted, and dependency-free; otherwise it returns a
+    manual-recovery preview without partial deletion. Successful undo removes links atomically,
+    preserves audit and the original receipt, and resumes the same decision revision.
+  - Create/list/get/update/respond/withdraw/cancel/reopen/undo APIs and generated Web/iOS/Android
+    models expose the fixed record, status, deadline, policy, option, effect, response, projection,
+    receipt, and undo types. Every mutation requires Idempotency-Key and expected_revision, while
+    resolve/materialization also checks Operation expected_revision and expected_plan_revision.
+  - "The persistence migration, service authorization, and Supabase RLS enforce same-family,
+    accepted-membership, visible-decider, affected-member/child, creator, parent, and child-safe
+    projection rules. Raw sensitive option text, exact amount outside parent/audit, other decider
+    choices, credentials, and provider payloads never enter notification, metric, push, or child
+    projections; audit, receipt, and retention follow #768 rather than inventing a second policy."
+  - A single atomic transaction stores the response, quorum decision, protected-effect gate,
+    task/handoff resources, Operation link, next action, revision and plan_revision, audit, and
+    activity receipt. Replay and retry return the same receipt without duplicate resources or
+    notifications, and stale revisions, duplicate options, invalid responses, missing previews, or
+    cross-family references fail closed with no partial commit.
+  - OpenAPI, generated clients, role-safe fixtures, Web, Android, and iOS flows agree on status and
+    projection shapes, opaque sync_needed/projection_revision_hint/opaque_event_id push payloads,
+    422 validation, 403/ACL failures, 409 revision conflicts, accessibility, offline read-only
+    behavior, and privacy-safe error/telemetry content.
+implementation_constraints: []
+verification:
+  commands:
+    - command: pnpm
+      args:
+        - run
+        - verify:all
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 3600
+    - command: pnpm
+      args:
+        - run
+        - verify:python:fast
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:openapi:full
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1200
+    - command: pnpm
+      args:
+        - run
+        - test:backend:db-smoke
+      env:
+        UV_CACHE_DIR: .uv-cache
+        FAMNEST_BACKEND_DB_SMOKE_APPLY_MIGRATIONS: "1"
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:migrations
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 900
+  profile_hash: sha256:9cd23759c439791ee18b080f15879952e60164c09aa075c0fd14047c7f9fe767
+required_new_tests:
+  - Add backend and migrated-Postgres tests for all three policies, tie/simple-plurality behavior,
+    visible roster and creator rules, membership invalidation, role/RLS matrices, deadline DST
+    validation, grace/no-response behavior, revision/idempotency replay, protected-effect approval,
+    blocked resolution, and strict no-partial undo.
+  - Add generated OpenAPI and Web contract/use-case tests for every endpoint, discriminator,
+    projection privacy boundary, opaque push shape, 422/403/409 error, offline/read-only, and
+    accessibility state.
+  - Add Android data/application/presentation tests and iOS Core/API/App tests for serialization,
+    role-safe projections, immediate resolve/materialization receipts, strict undo, revision
+    conflicts, offline behavior, and accessible state rendering.
+limits:
+  max_changed_files: 500
+  max_diff_lines: 100000
+  allow_test_deletion: false
+  max_repair_attempts: 2
+stop_conditions:
+  - A requested behavior requires credentials, production deployment, live provider or notification
+    delivery, production database mutation, store submission, or device-only evidence.
+  - A dependency contract is missing or incompatible and would require changing a parent-owned or
+    earlier-wave contract instead of implementing DecisionCard within this task's approved scope.
+  - Any proposed change would expose sensitive option text, exact cost, other decider choices,
+    identifiers, or provider payload outside the authorized parent/audit projection.
+pull_request:
+  mode: new_draft
+status: approved
+spec_hash: sha256:13a48f5e5427eadfe09274da086d03b88532e0fbbd38faecd2d9840083f1ae22
+policy_version: 3
+target:
+  origin: HearingOffice/elevife-famnest
+  base_ref: main
+  destination_ref: main
+  base_sha: 7c3f7a7b82b8af1903d09a512906dc1c931c65c4
+  context_digest: sha256:ba00749127a08b66416a2e4ca830e4854a21440f01320b13953e5003014d5cfd
+approval:
+  approved_at: 2026-07-31T18:45:08.597Z
+  approved_by: local-user

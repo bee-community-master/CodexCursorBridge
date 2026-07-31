@@ -1,0 +1,235 @@
+id: TASK-FAMNEST-763-IMPLEMENT
+repository: famnest
+title: Implement role-safe credit balance history and insufficient-credit recovery UX
+spec_version: 1
+goal: "Implement issue #763's credit balance and transaction projections, insufficient-credit
+  recovery, generated OpenAPI and Web/iOS/Android clients, role-safe UI/accessibility states, and
+  opaque notification semantics on top of the authoritative ledger and metering contracts from
+  #760-#762."
+context_files:
+  - AGENTS.md
+  - docs/operations/build-contract.md
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - docs/engineering/backend-architecture.md
+  - docs/engineering/web-architecture.md
+  - docs/engineering/android-architecture.md
+  - docs/engineering/ios-architecture.md
+  - packages/shared-types/openapi/famnest-api.json
+  - services/backend/src/famnest_backend/api/v1/billing.py
+  - services/backend/src/famnest_backend/application/billing.py
+  - services/backend/src/famnest_backend/application/ai_credits.py
+  - services/backend/src/famnest_backend/application/dto/billing.py
+  - services/backend/src/famnest_backend/application/ports/billing_repository.py
+  - services/backend/src/famnest_backend/repositories/billing_adapters.py
+  - services/backend/src/famnest_backend/repositories/postgres_credit_ledger_state.py
+  - services/backend/src/famnest_backend/repositories/postgres_credit_ledger_table_reads.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/billing/accessors.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/billing/policy.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/billing/state.py
+  - services/backend/tests/test_ai_credit_api.py
+  - services/backend/tests/test_ai_credit_ledger.py
+  - services/backend/tests/test_usage_metering_contract.py
+  - services/backend/tests/test_billing_policy.py
+  - services/backend/tests/test_native_credit_pack_schema.py
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - supabase/migrations/20260731100000_family_ai_credit_ledger.sql
+  - supabase/migrations/20260731125000_family_credit_lifecycle_hardening.sql
+  - supabase/migrations/20260731130000_native_credit_pack_purchase_bindings.sql
+  - supabase/migrations/20260731140000_family_ai_credit_ledger_replay.sql
+  - apps/web/src/lib/famnest/features/billing/billingApiRepository.ts
+  - apps/web/src/lib/famnest/features/billing/billingModels.ts
+  - apps/web/src/lib/famnest/features/billing/billingPorts.ts
+  - apps/web/src/lib/famnest/features/billing/billingReturn.ts
+  - apps/web/src/lib/famnest/features/billing/billingReturnPollingController.ts
+  - apps/web/src/routes/billing/return/+page.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestBillingApiDtos.kt
+  - apps/android/platform/src/main/java/com/elevife/famnest/android/platform/billing/AndroidPlayBillingClient.kt
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/SettingsBillingPanel.kt
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/SettingsBillingUiState.kt
+  - apps/android/presentation/src/test/java/com/elevife/famnest/android/ui/SettingsBillingViewModelStateTest.kt
+  - apps/ios/Sources/FamNestIOSCore/API/AppleBillingModels.swift
+  - apps/ios/Sources/FamNestIOSCore/API/AppleBillingTransactionModels.swift
+  - apps/ios/Sources/FamNestIOSCore/Billing/AppleSubscriptionUseCase.swift
+  - apps/ios/Sources/FamNestIOSApp/AppShell/Billing/State/AppViewModelBillingState.swift
+  - apps/ios/Tests/FamNestIOSAPITests/FamNestAPIClientBillingTests.swift
+  - apps/ios/Tests/FamNestIOSAppTests/BillingStateTests.swift
+allowed_paths:
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/**
+  - services/backend/src/famnest_backend/api/v1/billing.py
+  - services/backend/src/famnest_backend/application/billing.py
+  - services/backend/src/famnest_backend/application/ai_credits.py
+  - services/backend/src/famnest_backend/application/dto/billing.py
+  - services/backend/src/famnest_backend/application/ports/billing*.py
+  - services/backend/src/famnest_backend/repositories/billing*.py
+  - services/backend/src/famnest_backend/repositories/postgres_credit*.py
+  - services/backend/src/famnest_backend/repositories/postgres_native_credit*.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/billing/**
+  - services/backend/src/famnest_backend/repositories/domain_runtime/ai/**
+  - services/backend/src/famnest_backend/services/billing*.py
+  - services/backend/tests/**credit**
+  - services/backend/tests/**billing**
+  - services/backend/tests/**usage_metering**
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - supabase/migrations/**
+  - apps/web/src/lib/api/generated/**
+  - apps/web/src/lib/famnest/features/billing/**
+  - apps/web/src/routes/billing/**
+  - apps/web/src/routes/families/**
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestBillingApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/settings/**
+  - apps/android/platform/src/main/java/com/elevife/famnest/android/platform/billing/**
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/SettingsBilling*.kt
+  - apps/android/presentation/src/test/java/com/elevife/famnest/android/**
+  - apps/ios/Sources/FamNestIOSCore/API/*Billing*.swift
+  - apps/ios/Sources/FamNestIOSCore/**
+  - apps/ios/Sources/FamNestIOSApp/Features/Settings/**
+  - apps/ios/Sources/FamNestIOSApp/AppShell/Billing/**
+  - apps/ios/Tests/**
+forbidden_paths:
+  - .env
+  - .env.*
+  - "**/.env"
+  - "**/.env.*"
+  - "**/credentials/**"
+  - "**/secrets/**"
+  - artifacts/private/**
+  - scripts/release/**
+  - scripts/deploy/**
+  - deployment/**
+  - "**/deployment/**"
+  - infra/**
+  - "**/production/**"
+  - supabase/config.toml
+  - "**/google-services.json"
+  - "**/GoogleService-Info.plist"
+non_goals:
+  - Do not replace the authoritative credit ledger, billing entitlement, or native purchase flows
+    owned by existing billing contracts.
+  - Do not give Web a checkout or store purchase capability; Web only explains native purchase and
+    links to the official store surface.
+  - Do not expose exact balance, expiry, price, purchase history, private AI usage, member/child
+    attribution, raw prompt/output, provider ID, or plan title to child/caregiver projections.
+  - Do not change production store products, provider consoles, live billing, push delivery,
+    production migrations, or financial settlement evidence.
+  - Do not modify credentials, deployment configuration, production resources, or external consoles.
+acceptance_criteria:
+  - GET /v1/families/{family_id}/billing/credits returns the generated full/availability_only union.
+    Parent full view includes available_centi_credits, reserved_centi_credits,
+    next_expiring_centi_credits, next_expires_at, entitlement_kind, actor/family can_purchase, and
+    balance_revision. Child and caregiver views contain only is_available, can_request_parent, and
+    balance_revision, never exact amount or expiry.
+  - "The transaction endpoint is parent-only cursor pagination with category exactly ocr, stt, llm,
+    private_ai_usage, grant, expiry, purchase, refund, or adjustment; signed integer centi-credit
+    amount, occurred_at, bounded status, and display reason are safe, ordered by occurred_at DESC
+    then ledger_event_id DESC with default limit 50, max 100, and #768 invalid_cursor 422. Raw
+    input, source filename, prompt/output, provider request ID, plan title, and member/child IDs
+    never appear."
+  - Insufficient responses use code insufficient_credits. Parent payload contains stage,
+    required_centi_credits, available_centi_credits, can_purchase, balance_revision, and nullable
+    resume_token; child/caregiver projection removes exact amount and stage detail while offering
+    the parent-request action. A stale balance is re-read and reserve is retried before provider
+    dispatch.
+  - Every platform uses integer centi-credit on the wire and locale-aware two-decimal display,
+    distinguishes loading, stale/offline read-only, zero, insufficient, pending, success, refund,
+    and error states, and shows the last-confirmed timestamp offline without claiming AI or purchase
+    availability. Parent Web/iOS/Android expose balance, expiry, category aggregate, history, and
+    insufficient recovery; native purchase CTA prevents double taps and Web never starts checkout.
+  - Parent native purchase guidance displays product and purchase fact with localized store price;
+    child/caregiver UI never leaks exact balance, expiry, price, purchase history, private member
+    usage, or private-plan existence and only offers AI availability and a parent request action.
+    Dynamic Type/font scale 200%, VoiceOver/TalkBack, keyboard navigation, narrow screens, and
+    reduced motion keep amount and CTA visible and distinguish state without color alone.
+  - Recurring-grant expiry notifications fire once per billing period at 70, 90, and 100 percent to
+    active parents only. Top-up-only lots have no expiry thresholds, but total-balance zero is
+    deduped once. APNs/FCM payloads are opaque sync_needed, projection revision hint, and opaque
+    event ID only; amount, category, member, and title are resolved after authorized sync.
+  - Authorization and RLS enforce same-family active membership, parent history access,
+    child/caregiver availability-only projection, cross-family denial, and privacy-safe
+    error/telemetry. Existing ledger, metering, reserve/settle, purchase/replay, idempotency,
+    revision, retention, and audit authority remain intact; no private AI content or plan/member
+    attribution reaches ledger, metric, notification, or generated client fixtures.
+  - OpenAPI, generated Web/iOS/Android clients, platform repositories, accessibility state
+    contracts, insufficient first-stage flow, and OCR-success-to-LLM-resume flow use the same wire
+    discriminator, amount formatting, cursor, stale revision, error, and privacy semantics. Every
+    mutation/retry remains idempotent and does not duplicate ledger events, notification thresholds,
+    reserves, or resumes.
+implementation_constraints: []
+verification:
+  commands:
+    - command: pnpm
+      args:
+        - run
+        - verify:all
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 3600
+    - command: pnpm
+      args:
+        - run
+        - verify:python:fast
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:openapi:full
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1200
+    - command: pnpm
+      args:
+        - run
+        - test:backend:db-smoke
+      env:
+        UV_CACHE_DIR: .uv-cache
+        FAMNEST_BACKEND_DB_SMOKE_APPLY_MIGRATIONS: "1"
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:migrations
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 900
+  profile_hash: sha256:9cd23759c439791ee18b080f15879952e60164c09aa075c0fd14047c7f9fe767
+required_new_tests:
+  - Add backend and migrated-Postgres tests for full versus availability-only projection,
+    parent/caregiver/child/cross-family matrix, integer amount/category/cursor bounds,
+    invalid_cursor, stale reserve retry, replay/idempotency, threshold dedupe, opaque push, and
+    privacy redaction.
+  - Add Web contract/use-case/UI tests for balance/history/insufficient and native-purchase guidance
+    across loading, offline/stale/error/pending/refund/accessibility states.
+  - Add Android data/platform/presentation and iOS API/App tests for generated DTOs, locale
+    formatting, parent versus child projection, native purchase pending/double-tap, OCR resume,
+    accessibility, and threshold/opaque notification fixtures.
+limits:
+  max_changed_files: 500
+  max_diff_lines: 100000
+  allow_test_deletion: false
+  max_repair_attempts: 2
+stop_conditions:
+  - A requested behavior requires credentials, production deployment, live provider/store billing or
+    push, production database mutation, store submission, or device-only evidence.
+  - A change would alter authoritative ledger/metering/purchase contracts owned by issues 760, 761,
+    762, or another upstream issue.
+  - Any implementation would expose exact credits, private AI content, member attribution, provider
+    identifiers, or checkout from Web.
+pull_request:
+  mode: new_draft
+status: approved
+spec_hash: sha256:3cd4561b1ed38d3db0212dd38ee55ec835a2af6dcb38c8ea0521335fdfb6525e
+policy_version: 3
+target:
+  origin: HearingOffice/elevife-famnest
+  base_ref: main
+  destination_ref: main
+  base_sha: 7c3f7a7b82b8af1903d09a512906dc1c931c65c4
+  context_digest: sha256:167e622e70df542ef61bee938faa04787f0770f60e21894f88d40c41f0d40828
+approval:
+  approved_at: 2026-07-31T18:45:29.230Z
+  approved_by: local-user

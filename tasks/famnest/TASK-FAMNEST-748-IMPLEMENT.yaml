@@ -1,0 +1,293 @@
+id: TASK-FAMNEST-748-IMPLEMENT
+repository: famnest
+title: Implement shared-image document staging, upload, analysis, credit, and privacy contracts
+spec_version: 1
+goal: "Implement issue #748's additive OS-share common contract across backend, persistence and RLS,
+  generated OpenAPI, AI fan-out/fan-in, credit orchestration, telemetry, and shared Web/iOS/Android
+  data fixtures while leaving platform-specific iOS Share Extension and Android intent lifecycle
+  work to #749 and #750."
+context_files:
+  - AGENTS.md
+  - docs/operations/build-contract.md
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - docs/engineering/backend-architecture.md
+  - docs/engineering/web-architecture.md
+  - docs/engineering/android-architecture.md
+  - docs/engineering/ios-architecture.md
+  - packages/shared-types/openapi/famnest-api.json
+  - services/backend/src/famnest_backend/api/v1/input_items.py
+  - services/backend/src/famnest_backend/api/v1/uploads.py
+  - services/backend/src/famnest_backend/application/input_ingestion/items.py
+  - services/backend/src/famnest_backend/application/input_ingestion/uploads.py
+  - services/backend/src/famnest_backend/application/input_ingestion_permissions.py
+  - services/backend/src/famnest_backend/domain/input_source_lifecycle_helpers.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/input/source_validation.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/input/source_upload_completion.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/input/source_upload_processing.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/input/source_upload_transitions.py
+  - services/backend/src/famnest_backend/repositories/postgres_input_persistence_wrappers.py
+  - services/backend/src/famnest_backend/repositories/postgres_input_table_reads.py
+  - services/backend/src/famnest_backend/application/ai_stage_metering.py
+  - services/backend/src/famnest_backend/application/ai_job_run_workflow.py
+  - services/backend/src/famnest_backend/application/ai_credits.py
+  - services/backend/src/famnest_backend/application/candidate_approval.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/ai/job_lifecycle.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/input/ai_processing_lifecycle.py
+  - services/backend/src/famnest_backend/application/ports/input_uploads.py
+  - services/backend/src/famnest_backend/application/ports/input_items.py
+  - services/backend/src/famnest_backend/application/ports/ai_credits.py
+  - services/backend/src/famnest_backend/application/ports/ai_jobs.py
+  - services/backend/src/famnest_backend/rls.py
+  - services/backend/tests/test_input_approval_flow.py
+  - services/backend/tests/test_input_runtime.py
+  - services/backend/tests/test_source_file_policy.py
+  - services/backend/tests/test_ai_stage_metering.py
+  - services/backend/tests/test_ai_stage_metering_contract_fixture.py
+  - services/backend/tests/test_postgres_ai_stage_metering_recovery.py
+  - services/backend/tests/test_candidate_approval.py
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - supabase/migrations/20260502130000_source_taxonomy.sql
+  - supabase/migrations/20260731100000_family_ai_credit_ledger.sql
+  - supabase/migrations/20260731130000_family_operations_v15.sql
+  - packages/shared-types/fixtures/ai-stage-metering-contract-v1.json
+  - apps/web/src/lib/famnest/features/input/inputApiRepository.ts
+  - apps/web/src/lib/famnest/features/input/inputModels.ts
+  - apps/web/src/lib/famnest/features/input/inputUseCases.ts
+  - apps/web/src/lib/famnest/shared/uploadMime.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestInputApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestInputApiPaths.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/input/InputCaptureApi.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/input/InputCaptureRepository.kt
+  - apps/android/platform/src/main/java/com/elevife/famnest/android/platform/input/AndroidSharedInputDraftParser.kt
+  - apps/android/platform/src/main/java/com/elevife/famnest/android/platform/input/AndroidInputSourceLimits.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/input/InputCaptureApiTest.kt
+  - apps/ios/Sources/FamNestIOSCore/API/APIInputCaptureModels.swift
+  - apps/ios/Sources/FamNestIOSCore/API/APIInputCaptureSourceModels.swift
+  - apps/ios/Sources/FamNestIOSCore/API/APIInputCaptureUploadModels.swift
+  - apps/ios/Sources/FamNestIOSCore/API/APIInputCaptureUploadRequestModels.swift
+  - apps/ios/Sources/FamNestIOSCore/API/APIInputCaptureUploadResponseModels.swift
+  - apps/ios/Sources/FamNestIOSApp/AppShell/InputCapture/Share/AppViewModelInputCaptureShare.swift
+  - apps/ios/Sources/FamNestIOSApp/Features/InputCapture/Shared/InputCaptureDraftContext.swift
+  - apps/ios/Tests/FamNestIOSAPITests/FamNestAPIClientInputCaptureTests.swift
+allowed_paths:
+  - docs/operations/build-contract.md
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/**
+  - services/backend/src/famnest_backend/api/v1/input_items.py
+  - services/backend/src/famnest_backend/api/v1/uploads.py
+  - services/backend/src/famnest_backend/api/v1/candidate_packages.py
+  - services/backend/src/famnest_backend/application/input_ingestion/**
+  - services/backend/src/famnest_backend/application/input_ingestion_permissions.py
+  - services/backend/src/famnest_backend/application/ai_*.py
+  - services/backend/src/famnest_backend/application/candidate_approval*.py
+  - services/backend/src/famnest_backend/application/dto/input*.py
+  - services/backend/src/famnest_backend/application/dto/ai_*.py
+  - services/backend/src/famnest_backend/application/ports/input*.py
+  - services/backend/src/famnest_backend/application/ports/ai_*.py
+  - services/backend/src/famnest_backend/domain/input_*.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/input/**
+  - services/backend/src/famnest_backend/repositories/domain_runtime/ai/**
+  - services/backend/src/famnest_backend/repositories/postgres_input*.py
+  - services/backend/src/famnest_backend/repositories/postgres_ai*.py
+  - services/backend/src/famnest_backend/repositories/input*.py
+  - services/backend/src/famnest_backend/services/input_extraction*.py
+  - services/backend/src/famnest_backend/services/ai_*.py
+  - services/backend/src/famnest_backend/rls.py
+  - services/backend/tests/**input**
+  - services/backend/tests/**upload**
+  - services/backend/tests/**source**
+  - services/backend/tests/**ai_stage**
+  - services/backend/tests/**candidate**
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - supabase/migrations/**
+  - apps/web/src/lib/api/generated/**
+  - apps/web/src/lib/famnest/features/input/**
+  - apps/web/src/lib/famnest/shared/uploadMime.*
+  - apps/web/src/routes/families/**/input-progress/**
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestInputApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestInputApiPaths.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/input/**
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/input/**
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/port/InputCapture*.kt
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/usecase/Input*.kt
+  - apps/android/platform/src/main/java/com/elevife/famnest/android/platform/input/AndroidInputSourceLimits.kt
+  - apps/android/platform/src/main/java/com/elevife/famnest/android/platform/input/AndroidInputContentMetadata.kt
+  - apps/android/platform/src/main/java/com/elevife/famnest/android/platform/input/AndroidSharedInputDraftParser.kt
+  - apps/android/platform/src/test/java/com/elevife/famnest/android/platform/input/**
+  - apps/ios/Sources/FamNestIOSCore/API/APIInputCapture*.swift
+  - apps/ios/Sources/FamNestIOSCore/**
+  - apps/ios/Sources/FamNestIOSApp/AppShell/InputCapture/Share/**
+  - apps/ios/Sources/FamNestIOSApp/Features/InputCapture/Share/**
+  - apps/ios/Tests/**
+forbidden_paths:
+  - .env
+  - .env.*
+  - "**/.env"
+  - "**/.env.*"
+  - "**/credentials/**"
+  - "**/secrets/**"
+  - artifacts/private/**
+  - scripts/release/**
+  - scripts/deploy/**
+  - deployment/**
+  - "**/deployment/**"
+  - infra/**
+  - "**/production/**"
+  - supabase/config.toml
+  - "**/google-services.json"
+  - "**/GoogleService-Info.plist"
+non_goals:
+  - Do not implement the iOS Share Extension UI/file-transfer lifecycle owned by issues 749 and 750.
+  - Do not replace the existing generic file_upload source type, break legacy single-upload rows, or
+    add a general source type, background crawler, photo-library watcher, or OS-share push.
+  - Do not bypass existing authentication, upload validation, ownership, or candidate-approval gates.
+  - Do not store raw bytes, URI, filename, source app, client item ID,
+    family/member/child/input/source IDs in logs, metrics, crash reports, deep links, or push
+    payloads; server authorization/audit may retain bounded identifiers under its retention policy.
+  - Do not claim production bucket/provider/notification deliverability, live migration,
+    device/store readiness, or external side effects from repository tests.
+  - Do not modify credentials, deployment configuration, production resources, or external consoles.
+acceptance_criteria:
+  - One OS-share job creates exactly one logical document, one input_item, and one candidate
+    package. Native and backend reject original_image_count >= 11 before content processing. After
+    validation and byte-identical dedupe, one to five ordered images use representation
+    multi_source_images with immutable zero-based source ordinals; six to ten images use
+    representation synthesized_pdf with one authoritative PDF source, original_image_count, and
+    page_count. Existing file_upload source type remains and ingestion_surface=os_share is the only
+    new entry-surface discriminator.
+  - POST intents, source complete-upload, refresh-shared-image-upload-urls, and
+    finalize-shared-image- document endpoints are present in generated OpenAPI and clients with
+    existing auth/session, envelope, error, and 24-hour Idempotency-Key conventions. Intent
+    validates role-specific child profile scope, file count/ordinal/MIME/page shape and returns
+    input/source IDs, 15-minute signed URL, required headers, and expiry. Same-key same-payload
+    replay returns identical IDs; changed payload is an idempotency conflict.
+  - Complete validates actual byte_size, MIME and magic bytes, 20MB size, SHA-256, object ownership,
+    input/source family, and verified duplicate hashes. It transitions only source state to
+    uploaded/verified and never starts OCR, LLM, or candidate generation. Replay succeeds only for
+    the same payload; changed metadata conflicts. Refresh issues URLs only for incomplete sources,
+    never adds or mutates ordinal/metadata, and refuses verified/finalized/canceled/expired sources.
+  - Finalize accepts one or more verified source IDs in original ordinal order. Multi-source permits
+    partial success only when the accepted remainder is one to five and retains original ordinal
+    values; synthesized PDF requires its single complete PDF and never partial page finalize.
+    Accepted source set/order becomes immutable, the AI dispatch outbox is created exactly once,
+    replay returns the same candidate pipeline, changed set/order conflicts, and post-finalize
+    add/complete/ refresh/accepted-set mutation is rejected.
+  - Persistence adds exact ingestion_surface, representation, original_image_count, page_count,
+    submitted_by_member_id, finalized_at, and source_file input FK/immutable ordinal/verified
+    sha256/byte_size/MIME/status fields with unique input+ordinal and verified input+sha256 indexes.
+    Existing single-upload rows migrate as ordinal-zero sources, single candidate/source assumptions
+    become input-based joins, and migration plus migrated PostgreSQL smoke validates legacy and both
+    new representations atomically with no partial commit.
+  - Multi-source OCR fans out one job per accepted source with immutable ordinal; synthesized PDF
+    preserves page ordinal. Provider retries are source/page scoped, LLM starts only after all OCR
+    is terminal, one or more successful extractions cause exactly one ordered LLM call and
+    candidate, partial terminal failure stores missing_page_ordinals plus warning and blocks parent
+    approval until warning acknowledgement audit, and all-failure creates no candidate but remains
+    retryable.
+  - Credit orchestration reserves accepted image/PDF pages at 100 integer centi-credits each before
+    dispatch, uses stable logical/stage/ordinal keys for retries, settles successes and releases
+    failures, reserves downstream LLM separately, and resumes from retained extraction when the LLM
+    reserve is insufficient. Logical document/object/source count never changes page billing, and no
+    duplicate reserve/settle/ledger event occurs on replay or crash retry.
+  - Intent, complete, refresh, finalize, read, candidate approval, and source access enforce active
+    same-family membership, role-specific child scope, submitted account scope, parent-only
+    approval, object ownership, and RLS. Submitter owner access is limited to their own submitted
+    originals and candidate while active, is immediately revoked on leave/suspend/delete/account
+    deletion, and parent sensitive-input revocation records actor, reason, input, affected member,
+    and timestamp in audit. Cross-family, inactive, out-of-scope, and other-account staging
+    references fail closed.
+  - Non-protected submitter candidate readiness creates only the existing in-app parent notification
+    row; extension/receiver performs no event endpoint call; main app records only received,
+    presented, submitted, and candidate_ready product interactions. Telemetry and crash/error paths
+    contain no raw bytes, URI, filename, source app, client correlation ID, or family/member/child/
+    input/source ID; APNs/FCM remains opaque sync-needed only.
+  - "Shared staging fixtures and generated Web/iOS/Android data clients implement staging -> staged
+    -> claimed -> uploading -> awaiting_user_choice or ready_to_finalize ->
+    finalized/cancelled/expired, account limits of three bundles, fifteen files, and 200MB with
+    24-hour TTL, single-consume host claim, no auto-delete on limit overflow, explicit
+    retry-versus-successful-subset choice after 1s/ 3s retries, and idempotent cleanup on cancel,
+    expiry, logout, or account change. #749/#750 remain separate native ingress implementations."
+  - OpenAPI, generated Web/iOS/Android contracts, role-safe fixtures, application errors, signed URL
+    expiry, idempotency, revision, privacy, retention, and accessibility states agree. Existing
+    generic upload/read/approval flows remain backward compatible, and no production migration,
+    provider, bucket, push, or store evidence is asserted by repo-local completion.
+implementation_constraints: []
+verification:
+  commands:
+    - command: pnpm
+      args:
+        - run
+        - verify:all
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 3600
+    - command: pnpm
+      args:
+        - run
+        - verify:python:fast
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:openapi:full
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1200
+    - command: pnpm
+      args:
+        - run
+        - test:backend:db-smoke
+      env:
+        UV_CACHE_DIR: .uv-cache
+        FAMNEST_BACKEND_DB_SMOKE_APPLY_MIGRATIONS: "1"
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:migrations
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 900
+  profile_hash: sha256:9cd23759c439791ee18b080f15879952e60164c09aa075c0fd14047c7f9fe767
+required_new_tests:
+  - Add backend and migrated-Postgres tests for 1-5 images, 6-10 PDF, >=11 rejection,
+    size/MIME/magic/SHA/ownership, duplicate hash, idempotency/replay/conflict, signed URL refresh,
+    immutable finalize and auth/RLS/privacy/revocation.
+  - Add AI fan-out/fan-in and credit reserve/settle/release/retry/resume tests for ordered partial
+    OCR, warning acknowledgement, all-failure, single LLM call, insufficient first-stage and
+    mid-pipeline, and duplicate ledger prevention.
+  - Add generated OpenAPI plus Web, Android, and iOS common data/fixture tests for both
+    representations, staging state machine, limits/TTL/cleanup, opaque telemetry/push,
+    accessibility, and backward-compatible single upload; leave
+limits:
+  max_changed_files: 500
+  max_diff_lines: 100000
+  allow_test_deletion: false
+  max_repair_attempts: 2
+stop_conditions:
+  - A requested behavior requires credentials, production deployment, live
+    storage/provider/notification, production database mutation, store submission, or device-only
+    evidence.
+  - A requested native ingress change belongs to issues 749, 750, or another out-of-scope native
+    delivery issue rather than the shared image document contract.
+  - Any implementation would weaken file validation, ownership, RLS, parent-only approval, privacy,
+    idempotency, revision, cleanup, retention, or opaque telemetry/push guarantees.
+pull_request:
+  mode: new_draft
+status: approved
+spec_hash: sha256:aa88b77e093c909cf10a0fd42e89f8dd955f395397b75fec299f0f9707ddb03e
+policy_version: 3
+target:
+  origin: HearingOffice/elevife-famnest
+  base_ref: main
+  destination_ref: main
+  base_sha: 7c3f7a7b82b8af1903d09a512906dc1c931c65c4
+  context_digest: sha256:23e163d21f114d22c57c0a72e44e7de1887c3e2c49e06c39c613e7318ccb5df0
+approval:
+  approved_at: 2026-07-31T18:45:35.635Z
+  approved_by: local-user

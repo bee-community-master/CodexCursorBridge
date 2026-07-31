@@ -1,0 +1,241 @@
+id: TASK-FAMNEST-730-IMPLEMENT
+repository: famnest
+title: Implement operational-memory trial application review and undo lifecycle
+spec_version: 1
+goal: "Implement issue #730's two-week operational-memory trial, explicit review and activation,
+  material-edit re-consent, fail-closed application pipeline, immutable audit, scheduler retries,
+  and bounded undo across backend persistence, OpenAPI, generated Web/iOS/Android contracts, and
+  role-safe UI without taking over #753 resolver or #754 notification ownership."
+context_files:
+  - AGENTS.md
+  - docs/operations/build-contract.md
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - docs/engineering/backend-architecture.md
+  - docs/engineering/web-architecture.md
+  - docs/engineering/android-architecture.md
+  - docs/engineering/ios-architecture.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/operational-memory-contract-v1.json
+  - packages/shared-types/fixtures/operational-memory-proposal-contract-v1.json
+  - packages/shared-types/fixtures/operational-consent-contract-v1.json
+  - services/backend/src/famnest_backend/api/v1/operational_memories.py
+  - services/backend/src/famnest_backend/application/operational_memory_use_case.py
+  - services/backend/src/famnest_backend/application/operational_memories.py
+  - services/backend/src/famnest_backend/application/operational_consent_use_case.py
+  - services/backend/src/famnest_backend/application/dto/operational_memories.py
+  - services/backend/src/famnest_backend/application/dto/operational_memory_proposals.py
+  - services/backend/src/famnest_backend/application/ports/operational_memories.py
+  - services/backend/src/famnest_backend/application/ports/operational_consents.py
+  - services/backend/src/famnest_backend/application/consent_policy.py
+  - services/backend/src/famnest_backend/repositories/postgres_operational_memory_records.py
+  - services/backend/src/famnest_backend/repositories/postgres_operational_consent_records.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/operations/accessors.py
+  - services/backend/tests/test_operational_memory_lifecycle.py
+  - services/backend/tests/test_operational_memory_proposals_api.py
+  - services/backend/tests/test_operational_consent_persistence_contract.py
+  - services/backend/tests/test_consent_policy.py
+  - supabase/migrations/20260731120000_operational_memories.sql
+  - supabase/migrations/20260731160000_operational_consents.sql
+  - supabase/migrations/20260731180000_operational_memory_proposals.sql
+  - supabase/migrations/20260731200000_operational_memory_member_pause_transition.sql
+  - apps/web/src/lib/famnest/features/operationalMemoryContract.ts
+  - apps/web/src/lib/famnest/features/operationalMemoryProposalContract.ts
+  - apps/web/src/lib/famnest/features/operationalConsentContract.ts
+  - apps/web/src/lib/famnest/features/operations/operationsModels.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOperationalMemoryApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOperationalConsentApiDtos.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/FamNestOperationalMemoryApiDtosTest.kt
+  - apps/ios/Sources/FamNestIOSCore/API/APIOperationalMemoryModels.swift
+  - apps/ios/Sources/FamNestIOSCore/API/APIOperationalConsentModels.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/APIOperationalMemoryContractTests.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/APIOperationalConsentContractTests.swift
+allowed_paths:
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/**
+  - services/backend/src/famnest_backend/api/v1/operational_memories.py
+  - services/backend/src/famnest_backend/application/operational_memory*.py
+  - services/backend/src/famnest_backend/application/operational_consent*.py
+  - services/backend/src/famnest_backend/application/consent_policy.py
+  - services/backend/src/famnest_backend/application/dto/operational*.py
+  - services/backend/src/famnest_backend/application/ports/operational*.py
+  - services/backend/src/famnest_backend/repositories/postgres_operational*.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/operations/**
+  - services/backend/tests/**operational_memory**
+  - services/backend/tests/**operational_consent**
+  - services/backend/tests/test_consent_policy.py
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - supabase/migrations/**
+  - apps/web/src/lib/api/generated/**
+  - apps/web/src/lib/famnest/features/operationalMemory*.ts
+  - apps/web/src/lib/famnest/features/operationalConsent*.ts
+  - apps/web/src/lib/famnest/features/operations/**
+  - apps/web/src/routes/families/**
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/**
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOperationalMemoryApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestOperationalConsentApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/operations/**
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/**Operational**
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/**
+  - apps/android/presentation/src/test/java/com/elevife/famnest/android/ui/**
+  - apps/ios/Sources/FamNestIOSCore/API/APIOperational*.swift
+  - apps/ios/Sources/FamNestIOSCore/**
+  - apps/ios/Sources/FamNestIOSApp/AppShell/FamilyOperationSettings/**
+  - apps/ios/Sources/FamNestIOSApp/Features/**
+  - apps/ios/Tests/**
+forbidden_paths:
+  - .env
+  - .env.*
+  - "**/.env"
+  - "**/.env.*"
+  - "**/credentials/**"
+  - "**/secrets/**"
+  - artifacts/private/**
+  - scripts/release/**
+  - scripts/deploy/**
+  - deployment/**
+  - "**/deployment/**"
+  - infra/**
+  - "**/production/**"
+  - supabase/config.toml
+  - "**/google-services.json"
+  - "**/GoogleService-Info.plist"
+non_goals:
+  - Do not implement product-specific resolver adapters owned by later issues or external provider
+    integrations outside the operational-memory trial/application lifecycle.
+  - Do not trial or auto-apply high or very_high risk actions, and do not turn legacy_unreviewed
+    behavior into a new trial before its first material edit.
+  - Do not auto-revert human edits, explicit completion/cancel state, latest verified source, or
+    agreement conflicts; preserve safe subsets or block with explainable paths.
+  - Do not store sensitive memory text, credentials, contacts, provider payloads, or raw
+    child/member attribution in application audit, metrics, notifications, or public DTOs.
+  - Do not claim production scheduler execution, provider deliverability, live consent effect,
+    production migration, device/store readiness, or experiment/product impact from repository
+    evidence.
+  - Do not modify credentials, deployment configuration, production resources, or external consoles.
+acceptance_criteria:
+  - Only low family agreements and medium agreement-plus-affected-member-consent automation policy
+    revisions can enter a 14-calendar-day trial. High, very_high, and legacy_unreviewed are excluded
+    as specified. The lifecycle is awaiting_consent -> trial_scheduled -> trial_active -> review_due
+    -> active, with immediate fail-closed pause on consent withdrawal, safety block, source
+    invalidation, member leave, or revoke and no rollback merely because periodic review is pending.
+  - Trial starts at the next local midnight after the final required consent, uses an exact
+    half-open [starts_at, ends_at) 14-calendar-day boundary, snapshots timezone ID, UTC offset,
+    local and UTC endpoints, and never moves an existing boundary after DST or family-timezone
+    changes. A pre-start timezone change invalidates the reservation and rebooks a new revision with
+    an audit reason.
+  - At review_due the user must continue, modify, or stop. Continue activates that revision, stop
+    pauses it, and material modify invalidates prior consent and restarts consent plus trial. No
+    review for 30 calendar days expires the trial and requires a new consent/trial to resume.
+    Periodic family fact/agreement-policy review recommendations are emitted at 12/6 months without
+    stopping existing application, while fail-closed safety events stop immediately.
+  - Material edit detection covers kind/domain/action/resource scope, condition/result/value,
+    affected or assigned members, protected subject, risk fields, agreement-policy linkage,
+    automation window/frequency/limit, and meaning-changing source. Title/description/microcopy,
+    display metadata, and irrelevant typo changes are non-material. The exact field paths and
+    decision are version-audited, and material changes invalidate consent, approval, and trial.
+  - "Preview/execute/skip/block uses the fixed pipeline of membership and role, memory/policy
+    revision, #729 action registry and affected members, human/source/safety protection, agreement
+    conflict, dry-run effect and undo capability, idempotent execute, and projection invalidation.
+    The operational_memory_applications record stores family, memory/policy/version,
+    action/resource, affected members, risk, status, typed before/after diff or safe field mask,
+    protection reason, idempotency key, expected/actual revisions, actor, timestamp, and no
+    sensitive raw content."
+  - Application status is exactly previewed, applied, skipped, blocked, failed, or undone. Human
+    edits and completed/canceled state remain protected; safe non-conflicting fields may apply while
+    skipped paths and reasons remain explainable, but any active agreement conflict blocks the whole
+    action. Retry, replay, stale revision, out-of-order delivery, and partial skip create no
+    duplicate side effects or notification records.
+  - Reversible low/medium applications require Idempotency-Key and expected_revision for execute and
+    undo, default to a 24-hour undo TTL unless the action registry supplies a shorter TTL, compare
+    the before revision with current revision, preserve later human edits via safe subset or return
+    undo_conflict, and transition to undone exactly once. High/very_high, delete, and purge use
+    their bounded-context recovery contracts rather than generic undo.
+  - "The APIs expose trial create/get/review and application preview/create/list/get/undo with the
+    exact issue paths, generated OpenAPI discriminator/status/error/revision/idempotency shapes, and
+    role-safe Web/iOS/Android clients. RLS plus service authorization enforce family membership,
+    actor role, affected-member scope, consent source, and cross-family denial; privacy and #768
+    retention rules are applied to audit, projections, and deletion/purge behavior."
+  - "The runner claims due starts/ends, 30-day expiry, and 6/12-month review from authoritative DB
+    timestamps. At-least-once retries use unique transition and dedupe keys, never advance
+    boundaries for clock skew or crash replay, and emit notification/projection events only through
+    #754 opaque contracts. Web, Android, and iOS render consent, trial, review, paused, expired,
+    blocked, applied, and undo-conflict states accessibly without exposing protected memory
+    details."
+implementation_constraints: []
+verification:
+  commands:
+    - command: pnpm
+      args:
+        - run
+        - verify:all
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 3600
+    - command: pnpm
+      args:
+        - run
+        - verify:python:fast
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:openapi:full
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1200
+    - command: pnpm
+      args:
+        - run
+        - test:backend:db-smoke
+      env:
+        UV_CACHE_DIR: .uv-cache
+        FAMNEST_BACKEND_DB_SMOKE_APPLY_MIGRATIONS: "1"
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:migrations
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 900
+  profile_hash: sha256:9cd23759c439791ee18b080f15879952e60164c09aa075c0fd14047c7f9fe767
+required_new_tests:
+  - Add deterministic clock/timezone/DST backend and migrated-Postgres tests for exact boundaries,
+    state transitions, timezone change, expiry, review recommendation, and safety stop behavior.
+  - Add material/non-material edit matrix, consent/trial invalidation, human/source protection,
+    conflict, idempotency/replay, partial-skip, audit-redaction, RLS, retention, and undo
+    TTL/revision tests.
+  - Add OpenAPI and Web, Android, and iOS contract/UI tests for every endpoint/status/discriminator,
+    role-safe projections, accessibility, offline/stale/error states, and opaque notification
+    payloads.
+limits:
+  max_changed_files: 500
+  max_diff_lines: 100000
+  allow_test_deletion: false
+  max_repair_attempts: 2
+stop_conditions:
+  - A requested behavior requires credentials, production deployment, live provider/notification,
+    production database mutation, store submission, or device-only evidence.
+  - A requested resolver or notification behavior belongs to an out-of-scope issue, provider, or
+    production integration rather than this lifecycle contract.
+  - Any implementation would weaken high/very_high approval, consent withdrawal, human/source
+    protection, privacy, RLS, idempotency, revision, or retention boundaries.
+pull_request:
+  mode: new_draft
+status: approved
+spec_hash: sha256:8bc647f06d5d1321654b3fa8c49274f662049b4f9a8f7973d0a387ab1b37fac9
+policy_version: 3
+target:
+  origin: HearingOffice/elevife-famnest
+  base_ref: main
+  destination_ref: main
+  base_sha: 7c3f7a7b82b8af1903d09a512906dc1c931c65c4
+  context_digest: sha256:f7aa4336a4643a755ba3e7ff324e108bd61000323505831e43a0bfbe525d60be
+approval:
+  approved_at: 2026-07-31T18:45:23.243Z
+  approved_by: local-user
