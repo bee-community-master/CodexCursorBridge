@@ -63,6 +63,7 @@ describe("workflow artifact writer", () => {
           executable: "/private/tmp/verify-cache/bin/pnpm.mjs",
           source: "verifier-owned-corepack-cache",
           network: "denied",
+          scope: "top_level_only",
         },
       }],
       error: "Verification failed with token: another-secret-value",
@@ -72,6 +73,7 @@ describe("workflow artifact writer", () => {
     expect(content).toContain("failing assertion");
     expect(content).toContain("pnpm@11.10.0 digest=sha512.abc123");
     expect(content).toContain("network=denied");
+    expect(content).toContain("scope=top_level_only");
     expect(content).toContain('argv: ["/usr/bin/node","/private/tmp/verify-cache/bin/pnpm.mjs","test"]');
     expect(content).not.toContain("super-secret-value");
     expect(content).not.toContain("another-secret-value");
@@ -143,6 +145,7 @@ describe("workflow artifact writer", () => {
           executable: "/private/tmp/verify-cache/bin/pnpm.mjs",
           source: "verifier-owned-corepack-cache",
           network: "denied",
+          scope: "top_level_only",
         },
       }],
     });
@@ -153,5 +156,7 @@ describe("workflow artifact writer", () => {
       .not.toContain("attestation-secret-value");
     expect(await readFile(attestationPath, "utf8"))
       .toContain("sha512.attestation");
+    expect(await readFile(attestationPath, "utf8"))
+      .toContain('"scope": "top_level_only"');
   });
 });

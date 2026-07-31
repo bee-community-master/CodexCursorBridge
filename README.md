@@ -8,7 +8,7 @@ Codex가 계획하고 사용자가 승인한 작업을 Cursor가 구현하도록
 2. 커밋된 Task의 commit/blob SHA를 SQLite Job에 기록합니다.
 3. launchd가 관리하는 supervisor가 Job을 원자적으로 claim하고 lease/heartbeat를 유지합니다.
 4. Cursor는 프로젝트 설정 source가 비활성화된 SDK sandbox에서 구조화된 `completed`, `blocked`, `needs_input` 결과를 제출하며, repair가 필요하면 실패 명령과 출력을 다음 시도에 내구적으로 보존합니다.
-5. Bridge는 승인 기준에서 만든 독립 Git index, 최소 환경, 네트워크 차단 sandbox로 검증하고, 검증 전후의 immutable candidate tree와 변경 범위를 다시 대조합니다. package-manager 검증은 후보 `package.json`의 정확한 `packageManager` 버전을 verifier-owned read-only Corepack cache에 stage한 뒤 `node`가 그 cache의 고정 entrypoint를 직접 실행합니다. Corepack integrity와 실제 artifact tree digest, 실행 binary/argv, `network=denied`를 report/attestation에 남기며, `COREPACK_*` task 환경과 package-manager 전환 인자는 거부합니다. `required_new_tests`가 있으면 삭제되지 않은 테스트 파일 변경도 최종 후보에 포함되어야 하며, 다른 검증 실패와 함께 제한된 repair 근거로 전달됩니다.
+5. Bridge는 승인 기준에서 만든 독립 Git index, 최소 환경, 네트워크 차단 sandbox로 검증하고, 검증 전후의 immutable candidate tree와 변경 범위를 다시 대조합니다. package-manager 검증은 후보 `package.json`의 정확한 `packageManager` 버전을 verifier-owned read-only Corepack cache에 stage한 뒤 `node`가 그 cache의 고정 entrypoint를 직접 실행합니다. Corepack integrity와 실제 artifact tree digest, 실행 binary/argv, `network=denied`를 report/attestation에 남기며, `COREPACK_*` task 환경과 package-manager 전환 인자는 거부합니다. package-manager attestation의 범위는 `scope=top_level_only`입니다. package script가 시작한 child process와 동적으로 선택된 실행 파일은 후보가 통제하므로 별도 attestation 대상이 아니며, staged PATH와 local package-manager shadow 차단은 defense-in-depth일 뿐 이를 완전한 nested 실행 보장으로 해석하지 않습니다. `required_new_tests`가 있으면 삭제되지 않은 테스트 파일 변경도 최종 후보에 포함되어야 하며, 다른 검증 실패와 함께 제한된 repair 근거로 전달됩니다.
 6. 최종 후보 tree/patch hash가 고정된 뒤 Git hook·commit/push signing을 비활성화하고, 등록된 fetch/push 원격에만 commit, push, Draft PR을 멱등 체크포인트로 수행합니다.
 7. 성공 상태는 `DELIVERED_REVIEW_REQUIRED`입니다. 자동 구현 완료가 사람/Codex 리뷰 완료를 뜻하지 않습니다.
 
@@ -65,6 +65,9 @@ manifest는 runtime home의 owner-only 파일이며, 이후 검증은 manifest�
 tree digest와 host cache를 대조합니다. host cache를 변경한 뒤 manifest를 다시 생성하지 않으면
 검증은 fail closed 합니다.
 
+Digest framing이 바뀌면 기존 manifest는 자동 신뢰되지 않습니다. `package-manager:provision`을
+다시 실행해 현재 artifact와 digest 버전으로 manifest를 재생성해야 합니다.
+
 ## Task 작성과 승인
 
 ```bash
@@ -119,6 +122,9 @@ pnpm smoke:cursor
 ```
 
 `pnpm smoke:cursor`는 임시 로컬 저장소만 사용하며 push나 PR 생성은 하지 않습니다.
+package-manager 구조·변조 검사는 synthetic artifact fixture를 사용하며, macOS 실실행 smoke는
+정확한 host Corepack artifact가 미리 준비된 경우에만 실행됩니다. 실실행을 확인하려면 먼저
+위의 `corepack pack`과 `package-manager:provision` 절차를 완료하세요.
 의존성 방향과 composition root 원칙은
 [`docs/architecture/cursor-bridge.md`](docs/architecture/cursor-bridge.md)에 정리되어
 있으며 `tests/architecture.test.ts`가 계층 역참조, import cycle, 과대 구현 파일,

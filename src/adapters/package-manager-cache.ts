@@ -22,6 +22,7 @@ export interface StagedPackageManager {
   entrypoint: string;
   source: "verifier-owned-corepack-cache";
   network: "denied";
+  scope: "top_level_only";
 }
 
 interface CorepackMetadata {
@@ -188,27 +189,88 @@ export async function inspectPackageManagerCache(
   }
 }
 
-async function artifactDigest(root: string, relative = ""): Promise<string> {
-  const hash = createHash("sha256");
+interface ArtifactDigestEntry {
+  kind: "directory" | "file";
+  relativePath: string;
+  mode: number;
+  size: number;
+  contentDigest?: string;
+}
+
+function updateDigestField(hash: ReturnType<typeof createHash>, value: string): void {
+  const bytes = Buffer.from(value, "utf8");
+  const length = Buffer.allocUnsafe(8);
+  length.writeBigUInt64BE(BigInt(bytes.byteLength));
+  hash.update(length);
+  hash.update(bytes);
+}
+
+async function collectArtifactDigestEntries(
+  root: string,
+  relative: string,
+  output: ArtifactDigestEntry[],
+): Promise<void> {
   const entries = await readdir(path.join(root, relative), { withFileTypes: true });
-  for (const entry of entries.sort((left, right) =>
-    left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
-  )) {
-    const childRelative = relative ? path.join(relative, entry.name) : entry.name;
+  entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+  for (const entry of entries) {
+    if (entry.name.includes("\0")) {
+      throw new Error("Independent verifier package cache contains an invalid entry name");
+    }
+    const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+    if (
+      childRelative.startsWith("/")
+      || childRelative === ".."
+      || childRelative.startsWith("../")
+      || childRelative.includes("/../")
+    ) {
+      throw new Error("Independent verifier package cache contains an invalid entry path");
+    }
     const child = path.join(root, childRelative);
     if (entry.isSymbolicLink()) {
       throw new Error("Independent verifier package cache may not contain symbolic links");
     }
+    const metadata = await lstat(child);
     if (entry.isDirectory()) {
-      hash.update(`directory\0${childRelative}\0`);
-      hash.update(await artifactDigest(child, ""));
+      output.push({
+        kind: "directory",
+        relativePath: childRelative,
+        mode: metadata.mode & 0o7777,
+        size: 0,
+      });
+      await collectArtifactDigestEntries(root, childRelative, output);
     } else if (entry.isFile()) {
-      hash.update(`file\0${childRelative}\0`);
-      hash.update(await readFile(child));
-      hash.update("\0");
+      const content = await readFile(child);
+      if (metadata.size !== content.byteLength) {
+        throw new Error("Independent verifier package cache changed while it was being hashed");
+      }
+      output.push({
+        kind: "file",
+        relativePath: childRelative,
+        mode: metadata.mode & 0o7777,
+        size: content.byteLength,
+        contentDigest: createHash("sha256").update(content).digest("hex"),
+      });
     } else {
       throw new Error("Independent verifier package cache contains an unsupported entry");
     }
+  }
+}
+
+async function artifactDigest(root: string): Promise<string> {
+  const entries: ArtifactDigestEntry[] = [];
+  await collectArtifactDigestEntries(root, "", entries);
+  entries.sort((left, right) => {
+    const pathOrder = Buffer.from(left.relativePath).compare(Buffer.from(right.relativePath));
+    return pathOrder || left.kind.localeCompare(right.kind);
+  });
+  const hash = createHash("sha256");
+  updateDigestField(hash, "cursor-bridge-package-manager-artifact-v2");
+  for (const entry of entries) {
+    updateDigestField(hash, entry.kind);
+    updateDigestField(hash, entry.relativePath);
+    updateDigestField(hash, String(entry.mode));
+    updateDigestField(hash, String(entry.size));
+    updateDigestField(hash, entry.contentDigest ?? "");
   }
   return hash.digest("hex");
 }
@@ -313,6 +375,7 @@ export async function stagePackageManager(
     entrypoint: validated.entrypoint,
     source: "verifier-owned-corepack-cache",
     network: "denied",
+    scope: "top_level_only",
   };
 }
 

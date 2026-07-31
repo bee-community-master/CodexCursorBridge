@@ -47,12 +47,21 @@ export function assertPackageManagerControlArgs(args: readonly string[]): void {
     "--workspace-concurrency",
   ]);
   const settings = new Set<string>();
-  const commandTokens: string[] = [];
+  const dangerousCommands = new Set([
+    "exec",
+    "dlx",
+    "env",
+    "self-update",
+    "setup",
+    "shell",
+    "with",
+  ]);
+  let command: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
     if (argument === "--") {
-      commandTokens.push(...args.slice(index + 1));
+      if (command === undefined) command = args[index + 1];
       break;
     }
     if (argument === "--config") {
@@ -71,11 +80,16 @@ export function assertPackageManagerControlArgs(args: readonly string[]): void {
     ) {
       settings.add(argument.replace(/^--/, ""));
     }
-    if (!argument.startsWith("-")) {
-      commandTokens.push(argument);
-    } else if (!argument.includes("=") && valueOptions.has(argument)) {
-      index += 1;
+    if (command !== undefined) continue;
+    if (argument.startsWith("-")) {
+      const optionName = argument.split("=", 1)[0] ?? "";
+      if (dangerousCommands.has(optionName.replace(/^-+/, ""))) command = optionName;
+      if (!argument.includes("=") && valueOptions.has(argument)) {
+        index += 1;
+      }
+      continue;
     }
+    command = argument;
   }
   if ([...settings].some((setting) =>
     /(?:^|\.)(?:manage-package-manager-versions|package-manager-strict|package-manager-on-fail|pm-on-fail)(?:=|$)/i
@@ -86,17 +100,8 @@ export function assertPackageManagerControlArgs(args: readonly string[]): void {
     );
   }
 
-  const dangerousCommands = new Set([
-    "exec",
-    "dlx",
-    "env",
-    "self-update",
-    "setup",
-    "shell",
-    "with",
-  ]);
-  const dangerousCommand = commandTokens.find((token) => dangerousCommands.has(token));
-  if (dangerousCommand) {
+  const dangerousCommand = command?.replace(/^-+/, "");
+  if (dangerousCommand && dangerousCommands.has(dangerousCommand)) {
     throw new Error(
       `Independent verifier rejects pnpm ${dangerousCommand}; nested package-manager execution is not attestable`,
     );
@@ -241,6 +246,7 @@ export class IndependentVerifier {
               executable: staged.executable,
               source: staged.source,
               network: staged.network,
+              scope: staged.scope,
             },
           } : {}),
         });
@@ -271,6 +277,7 @@ export class IndependentVerifier {
               executable: staged.executable,
               source: staged.source,
               network: staged.network,
+              scope: staged.scope,
             },
           } : {}),
         });

@@ -1,4 +1,5 @@
-import { chmod, cp, mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { chmod, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,17 +10,122 @@ import {
 } from "../src/adapters/independent-verifier.js";
 import {
   assertStagedPackageManager,
+  computePackageManagerArtifactDigest,
   hostCorepackHome,
   packageManagerDirectory,
   readPackageManager,
   stagePackageManager,
 } from "../src/adapters/package-manager-cache.js";
 import { provisionPackageManagerManifest } from "../src/adapters/package-manager-provenance.js";
+import { PACKAGE_MANAGER_DIGEST_VERSION } from "../src/adapters/package-manager-provenance-loader.js";
 import { createVerificationSandbox } from "../src/sandbox.js";
 
+const fakePackageManagerSpec = {
+  name: "pnpm" as const,
+  version: "11.10.0",
+  reference: "pnpm@11.10.0",
+};
+
+async function fakePackageManagerFixture(prefix: string): Promise<{
+  sourceHome: string;
+  sourceDirectory: string;
+  manifest: string;
+}> {
+  const sourceHome = await mkdtemp(path.join(tmpdir(), `${prefix}-host-`));
+  const sourceDirectory = packageManagerDirectory(sourceHome, fakePackageManagerSpec);
+  await mkdir(path.join(sourceDirectory, "bin"), { recursive: true, mode: 0o755 });
+  await writeFile(
+    path.join(sourceDirectory, ".corepack"),
+    JSON.stringify({
+      locator: { name: "pnpm", reference: fakePackageManagerSpec.version },
+      bin: { pnpm: "./bin/pnpm.mjs", pnpx: "./bin/pnpx.mjs" },
+      hash: `sha512.${"a".repeat(128)}`,
+    }),
+    "utf8",
+  );
+  await writeFile(
+    path.join(sourceDirectory, "package.json"),
+    JSON.stringify({ name: "pnpm", version: fakePackageManagerSpec.version }),
+    "utf8",
+  );
+  await writeFile(path.join(sourceDirectory, "bin", "pnpm.mjs"), "fake pnpm\n", { mode: 0o755 });
+  await writeFile(path.join(sourceDirectory, "bin", "pnpx.mjs"), "fake pnpx\n", { mode: 0o755 });
+  const manifestRoot = await mkdtemp(path.join(tmpdir(), `${prefix}-manifest-`));
+  const manifest = path.join(manifestRoot, "manifest.json");
+  const treeDigest = `sha256:${await computePackageManagerArtifactDigest(sourceDirectory)}`;
+  await writeFile(manifest, `${JSON.stringify({
+    schemaVersion: 1,
+    digestVersion: PACKAGE_MANAGER_DIGEST_VERSION,
+    generatedAt: "2026-07-31T00:00:00.000Z",
+    packages: {
+      "pnpm@11.10.0:pnpm": {
+        name: "pnpm",
+        version: fakePackageManagerSpec.version,
+        binary: "pnpm",
+        treeDigest,
+        entrypoint: "bin/pnpm.mjs",
+      },
+    },
+  }, null, 2)}\n`, "utf8");
+  await chmod(manifest, 0o600);
+  return { sourceHome, sourceDirectory, manifest };
+}
+
+async function withCorepackHome<T>(sourceHome: string, action: () => Promise<T>): Promise<T> {
+  const previous = process.env.COREPACK_HOME;
+  process.env.COREPACK_HOME = sourceHome;
+  try {
+    return await action();
+  } finally {
+    if (previous === undefined) delete process.env.COREPACK_HOME;
+    else process.env.COREPACK_HOME = previous;
+  }
+}
+
+async function legacyArtifactDigest(root: string, relative = ""): Promise<string> {
+  const hash = createHash("sha256");
+  const entries = await readdir(path.join(root, relative), { withFileTypes: true });
+  for (const entry of entries.sort((left, right) =>
+    left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+  )) {
+    const childRelative = relative ? path.join(relative, entry.name) : entry.name;
+    const child = path.join(root, childRelative);
+    if (entry.isDirectory()) {
+      hash.update(`directory\0${childRelative}\0`);
+      hash.update(await legacyArtifactDigest(child));
+    } else {
+      hash.update(`file\0${childRelative}\0`);
+      const content = await readFile(child);
+      hash.update(content);
+      hash.update("\0");
+    }
+  }
+  return hash.digest("hex");
+}
+
 describe("independent package-manager staging", () => {
+  it("uses unambiguous framing for split and merged artifact entries", async () => {
+    const split = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-digest-split-"));
+    const merged = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-digest-merged-"));
+    await writeFile(path.join(split, "a"), "left\0file\0c\0right", "utf8");
+    await writeFile(path.join(merged, "a"), "left", "utf8");
+    await writeFile(path.join(merged, "c"), "right", "utf8");
+
+    expect(await legacyArtifactDigest(split)).toBe(await legacyArtifactDigest(merged));
+
+    const [splitDigest, mergedDigest] = await Promise.all([
+      computePackageManagerArtifactDigest(split),
+      computePackageManagerArtifactDigest(merged),
+    ]);
+    expect(splitDigest).not.toBe(mergedDigest);
+  });
+
   it.each([
     ["self-update"],
+    ["--self-update"],
+    ["--exec"],
+    ["--env"],
+    ["--setup"],
     ["with", "11.12.0", "--version"],
     ["exec", "pnpm", "--version"],
     ["--dir", ".", "exec", "pnpm", "--version"],
@@ -29,6 +135,14 @@ describe("independent package-manager staging", () => {
     ["--config", "pm-on-fail=download"],
   ])("rejects package-manager control arguments: %s", (...args: string[]) => {
     expect(() => assertPackageManagerControlArgs(args)).toThrow(/package-manager|switch/i);
+  });
+
+  it.each([
+    ["run", "exec"],
+    ["run", "env"],
+    ["run", "setup"],
+  ])("allows dangerous words as pnpm script names: %s", (...args: string[]) => {
+    expect(() => assertPackageManagerControlArgs(args)).not.toThrow();
   });
 
   it("rejects every COREPACK_* task environment override", () => {
@@ -68,6 +182,29 @@ describe("independent package-manager staging", () => {
     await expect(readPackageManager(worktree)).rejects.toThrow(/exact pnpm/i);
   });
 
+  it("rejects old provenance framing until it is explicitly re-provisioned", async () => {
+    const fixture = await fakePackageManagerFixture("cursor-package-manager-migration");
+    const worktree = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-migration-worktree-"));
+    const stagingRoot = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-migration-stage-"));
+    await writeFile(
+      path.join(worktree, "package.json"),
+      JSON.stringify({ packageManager: "pnpm@11.10.0" }),
+      "utf8",
+    );
+    const oldManifest = JSON.parse(await readFile(fixture.manifest, "utf8")) as Record<string, unknown>;
+    delete oldManifest.digestVersion;
+    await writeFile(fixture.manifest, `${JSON.stringify(oldManifest)}\n`, "utf8");
+    await chmod(fixture.manifest, 0o600);
+
+    await withCorepackHome(fixture.sourceHome, async () => {
+      await expect(stagePackageManager(worktree, stagingRoot, fixture.manifest))
+        .rejects.toThrow(/manifest envelope|provisioning/i);
+      await expect(provisionPackageManagerManifest(fixture.manifest, "11.10.0"))
+        .resolves.toMatchObject({ version: "11.10.0", binary: "pnpm" });
+      await expect(stagePackageManager(worktree, stagingRoot, fixture.manifest)).resolves.toBeDefined();
+    });
+  });
+
   it("fails closed when the exact host Corepack artifact is absent", async () => {
     const worktree = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-missing-"));
     const scratch = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-missing-scratch-"));
@@ -87,16 +224,34 @@ describe("independent package-manager staging", () => {
     }
   });
 
-  it("executes the declared pnpm from a read-only cache with network denied", async () => {
+  it("records top-level manager identity while a candidate launches an absolute dynamic child", async () => {
     if (process.platform !== "darwin") return;
+    try {
+      await stat(packageManagerDirectory(hostCorepackHome(), fakePackageManagerSpec));
+    } catch {
+      return;
+    }
     const worktree = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-worktree-"));
     const scratch = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-scratch-"));
     const cacheRoot = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-cache-"));
     const hostilePath = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-hostile-path-"));
     const marker = path.join(hostilePath, "ran");
+    const dynamicMarker = path.join(worktree, "hostile-dynamic-ran");
+    const dynamicChild = path.join(hostilePath, "dynamic-pnpm");
+    const dynamicLauncher = path.join(hostilePath, "dynamic-launcher");
     await writeFile(
       path.join(hostilePath, "pnpm"),
       `#!/bin/sh\nprintf ran > ${marker}\nexit 99\n`,
+      { mode: 0o755 },
+    );
+    await writeFile(
+      dynamicChild,
+      `#!/bin/sh\nprintf ran > ${dynamicMarker}\n`,
+      { mode: 0o755 },
+    );
+    await writeFile(
+      dynamicLauncher,
+      `#!/bin/sh\nchild="$(dirname "$0")/dynamic-pnpm"\n"$child"\n`,
       { mode: 0o755 },
     );
     const localBin = path.join(worktree, "node_modules", ".bin");
@@ -111,7 +266,7 @@ describe("independent package-manager staging", () => {
       path.join(worktree, "package.json"),
       JSON.stringify({
         packageManager: "pnpm@11.10.0",
-        scripts: { probe: "pnpm --version" },
+        scripts: { probe: dynamicLauncher, shadow: "pnpm --version" },
       }),
       "utf8",
     );
@@ -161,7 +316,7 @@ describe("independent package-manager staging", () => {
     expect(childResult.stdout.trim()).toBe("11.10.0");
     await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
 
-    const nestedInvocation = createVerificationSandbox({
+    const dynamicInvocation = createVerificationSandbox({
       worktree,
       scratchDir: scratch,
       command: process.execPath,
@@ -172,9 +327,27 @@ describe("independent package-manager staging", () => {
       blockedProcessPaths: [path.join(localBin, "pnpm")],
       baseEnv: { PATH: `${hostilePath}:/opt/homebrew/bin:/usr/bin:/bin` },
     });
-    await expect(runFile(nestedInvocation.command, nestedInvocation.args, {
+    await expect(runFile(dynamicInvocation.command, dynamicInvocation.args, {
       cwd: worktree,
-      env: nestedInvocation.env,
+      env: dynamicInvocation.env,
+      timeoutMs: 15_000,
+    })).resolves.toBeDefined();
+    await expect(stat(dynamicMarker)).resolves.toBeDefined();
+
+    const shadowInvocation = createVerificationSandbox({
+      worktree,
+      scratchDir: scratch,
+      command: process.execPath,
+      args: [staged.executable, "run", "shadow"],
+      corepackHome: staged.corepackHome,
+      readOnlyRoots: [staged.corepackHome, hostilePath],
+      pathPrefix: [path.dirname(staged.executable), path.dirname(process.execPath)],
+      blockedProcessPaths: [path.join(localBin, "pnpm")],
+      baseEnv: { PATH: `${hostilePath}:/opt/homebrew/bin:/usr/bin:/bin` },
+    });
+    await expect(runFile(shadowInvocation.command, shadowInvocation.args, {
+      cwd: worktree,
+      env: shadowInvocation.env,
       timeoutMs: 15_000,
     })).rejects.toBeDefined();
     await expect(stat(localMarker)).rejects.toMatchObject({ code: "ENOENT" });
@@ -185,6 +358,7 @@ describe("independent package-manager staging", () => {
       entrypoint: "bin/pnpm.mjs",
       source: "verifier-owned-corepack-cache",
       network: "denied",
+      scope: "top_level_only",
     });
     expect(staged.digest).toMatch(/^sha512\.[a-f0-9]+$/i);
     expect(staged.artifactDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
@@ -193,51 +367,35 @@ describe("independent package-manager staging", () => {
   it("rejects staged artifact tampering after preparation", async () => {
     const worktree = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-tamper-worktree-"));
     const cacheRoot = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-tamper-cache-"));
+    const fixture = await fakePackageManagerFixture("cursor-package-manager-tamper");
     await writeFile(
       path.join(worktree, "package.json"),
       JSON.stringify({ packageManager: "pnpm@11.10.0" }),
       "utf8",
     );
-    const provenanceFile = path.join(cacheRoot, "manifest.json");
-    await provisionPackageManagerManifest(provenanceFile, "11.10.0");
-    const staged = await stagePackageManager(worktree, cacheRoot, provenanceFile);
-    await chmod(staged.executable, 0o644);
-    await writeFile(staged.executable, "tampered\n", "utf8");
-    await expect(assertStagedPackageManager(staged)).rejects.toThrow(/digest changed|integrity|shim changed/i);
+    await withCorepackHome(fixture.sourceHome, async () => {
+      const staged = await stagePackageManager(worktree, cacheRoot, fixture.manifest);
+      await chmod(staged.executable, 0o644);
+      await writeFile(staged.executable, "tampered\n", "utf8");
+      await expect(assertStagedPackageManager(staged)).rejects.toThrow(/digest changed|integrity|shim changed/i);
+    });
   });
 
-  it("rejects a host cache tamper after explicit provisioning", async () => {
-    const sourceHome = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-trusted-host-"));
+  it("rejects a source cache tamper after explicit provisioning", async () => {
     const stagingRoot = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-trusted-stage-"));
-    const manifest = path.join(stagingRoot, "manifest.json");
     const worktree = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-trusted-worktree-"));
+    const fixture = await fakePackageManagerFixture("cursor-package-manager-trusted");
     await writeFile(
       path.join(worktree, "package.json"),
       JSON.stringify({ packageManager: "pnpm@11.10.0" }),
       "utf8",
     );
-    const sourceDirectory = packageManagerDirectory(
-      hostCorepackHome(),
-      { name: "pnpm", version: "11.10.0", reference: "pnpm@11.10.0" },
-    );
-    const isolatedSource = packageManagerDirectory(
-      sourceHome,
-      { name: "pnpm", version: "11.10.0", reference: "pnpm@11.10.0" },
-    );
-    await mkdir(path.dirname(isolatedSource), { recursive: true });
-    await cp(sourceDirectory, isolatedSource, { recursive: true });
-    const previous = process.env.COREPACK_HOME;
-    process.env.COREPACK_HOME = sourceHome;
-    try {
-      await provisionPackageManagerManifest(manifest, "11.10.0");
-      await chmod(path.join(isolatedSource, "bin", "pnpm.mjs"), 0o644);
-      await writeFile(path.join(isolatedSource, "bin", "pnpm.mjs"), "pre-stage tamper\n", "utf8");
-      await expect(stagePackageManager(worktree, stagingRoot, manifest))
+    await withCorepackHome(fixture.sourceHome, async () => {
+      await chmod(path.join(fixture.sourceDirectory, "bin", "pnpm.mjs"), 0o644);
+      await writeFile(path.join(fixture.sourceDirectory, "bin", "pnpm.mjs"), "pre-stage tamper\n", "utf8");
+      await expect(stagePackageManager(worktree, stagingRoot, fixture.manifest))
         .rejects.toThrow(/provisioned artifact digest/i);
-    } finally {
-      if (previous === undefined) delete process.env.COREPACK_HOME;
-      else process.env.COREPACK_HOME = previous;
-    }
+    });
   });
 
   it("keeps the staged cache outside writable scratch roots", async () => {
@@ -245,29 +403,30 @@ describe("independent package-manager staging", () => {
     const worktree = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-rename-worktree-"));
     const scratch = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-rename-scratch-"));
     const cacheRoot = await mkdtemp(path.join(tmpdir(), "cursor-package-manager-rename-cache-"));
+    const fixture = await fakePackageManagerFixture("cursor-package-manager-rename");
     await writeFile(
       path.join(worktree, "package.json"),
       JSON.stringify({ packageManager: "pnpm@11.10.0" }),
       "utf8",
     );
-    const provenanceFile = path.join(cacheRoot, "manifest.json");
-    await provisionPackageManagerManifest(provenanceFile, "11.10.0");
-    const staged = await stagePackageManager(worktree, cacheRoot, provenanceFile);
-    const replacement = `${staged.corepackHome}.replacement`;
-    const invocation = createVerificationSandbox({
-      worktree,
-      scratchDir: scratch,
-      command: "/bin/mv",
-      args: [staged.corepackHome, replacement],
-      corepackHome: staged.corepackHome,
-      readOnlyRoots: [staged.corepackHome],
+    await withCorepackHome(fixture.sourceHome, async () => {
+      const staged = await stagePackageManager(worktree, cacheRoot, fixture.manifest);
+      const replacement = `${staged.corepackHome}.replacement`;
+      const invocation = createVerificationSandbox({
+        worktree,
+        scratchDir: scratch,
+        command: "/bin/mv",
+        args: [staged.corepackHome, replacement],
+        corepackHome: staged.corepackHome,
+        readOnlyRoots: [staged.corepackHome],
+      });
+      await expect(runFile(invocation.command, invocation.args, {
+        cwd: worktree,
+        env: invocation.env,
+        timeoutMs: 15_000,
+      })).rejects.toBeDefined();
+      await expect(stat(staged.corepackHome)).resolves.toBeDefined();
+      await expect(stat(replacement)).rejects.toMatchObject({ code: "ENOENT" });
     });
-    await expect(runFile(invocation.command, invocation.args, {
-      cwd: worktree,
-      env: invocation.env,
-      timeoutMs: 15_000,
-    })).rejects.toBeDefined();
-    await expect(stat(staged.corepackHome)).resolves.toBeDefined();
-    await expect(stat(replacement)).rejects.toMatchObject({ code: "ENOENT" });
   }, 30_000);
 });

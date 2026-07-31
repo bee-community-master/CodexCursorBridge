@@ -49,6 +49,7 @@ export interface PackageManagerAttestation {
   executable: string;
   source: "verifier-owned-corepack-cache";
   network: "denied";
+  scope: "top_level_only";
 }
 
 export interface ImplementerOutcome {

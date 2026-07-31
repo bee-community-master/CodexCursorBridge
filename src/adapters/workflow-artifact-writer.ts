@@ -109,7 +109,8 @@ export class WorkflowArtifactWriter {
             + ` artifactDigest=${result.packageManager.artifactDigest}`
             + ` runtime=${result.packageManager.runtime}`
             + ` entrypoint=${result.packageManager.entrypoint}`
-            + ` executable=${result.packageManager.executable}`,
+            + ` executable=${result.packageManager.executable}`
+            + ` scope=${result.packageManager.scope}`,
         ] : []),
         ...(result.output
           ? redactSensitiveText(result.output).split("\n").map((line) => `    ${line}`)

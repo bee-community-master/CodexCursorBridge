@@ -6,6 +6,8 @@ interface PackageManagerSpecForProvenance {
   version: string;
 }
 
+export const PACKAGE_MANAGER_DIGEST_VERSION = 2 as const;
+
 export interface PackageManagerProvenanceRecord {
   name: "pnpm";
   version: string;
@@ -16,6 +18,7 @@ export interface PackageManagerProvenanceRecord {
 
 export interface PackageManagerProvenanceFile {
   schemaVersion: 1;
+  digestVersion: typeof PACKAGE_MANAGER_DIGEST_VERSION;
   generatedAt: string;
   packages: Record<string, PackageManagerProvenanceRecord>;
 }
@@ -62,6 +65,7 @@ function parseManifest(value: unknown): PackageManagerProvenanceFile {
   const candidate = value as Record<string, unknown>;
   if (
     candidate.schemaVersion !== 1
+    || candidate.digestVersion !== PACKAGE_MANAGER_DIGEST_VERSION
     || typeof candidate.generatedAt !== "string"
     || candidate.packages === null
     || typeof candidate.packages !== "object"
@@ -74,6 +78,7 @@ function parseManifest(value: unknown): PackageManagerProvenanceFile {
   }
   return {
     schemaVersion: 1,
+    digestVersion: PACKAGE_MANAGER_DIGEST_VERSION,
     generatedAt: candidate.generatedAt,
     packages,
   };

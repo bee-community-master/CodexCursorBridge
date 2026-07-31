@@ -14,6 +14,7 @@ import {
 import { writeOwnerOnlyAtomic } from "./owner-only-atomic-file.js";
 import {
   packageManagerProvenanceKey,
+  PACKAGE_MANAGER_DIGEST_VERSION,
   readPackageManagerProvenanceManifest,
   type PackageManagerProvenanceRecord,
 } from "./package-manager-provenance-loader.js";
@@ -60,13 +61,17 @@ export async function provisionPackageManagerManifest(
   try {
     packages = (await readPackageManagerProvenanceManifest(file)).packages;
   } catch (error) {
-    if (!(error instanceof Error) || !error.message.includes("unavailable")) throw error;
+    if (
+      !(error instanceof Error)
+      || (!error.message.includes("unavailable") && !error.message.includes("manifest envelope is invalid"))
+    ) throw error;
   }
   packages[packageManagerProvenanceKey(spec.name, version, binary)] = record;
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   await chmod(path.dirname(file), 0o700);
   await writeOwnerOnlyAtomic(file, `${JSON.stringify({
     schemaVersion: 1,
+    digestVersion: PACKAGE_MANAGER_DIGEST_VERSION,
     generatedAt: new Date().toISOString(),
     packages,
   }, null, 2)}\n`);
