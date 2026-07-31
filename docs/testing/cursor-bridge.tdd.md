@@ -38,6 +38,7 @@ The source was the approved implementation plan in the Codex task. It was normal
 | GREEN: broader contract review | Current branch | Required test changes are a repairable final-candidate gate, all simultaneous verification failures are preserved for the bounded repair, report/attestation rewrites are atomic and owner-only, and attestation diagnostics are redacted again at persistence. |
 | RED: explicit Grok high effort | `bb71210` | Six tests failed because model params were discarded, Cursor received only `{ id }`, and no high-effort variant selector existed. |
 | GREEN: explicit Grok high effort | `7c85448` | Model params persist with backward compatibility, are validated against the live model variants, and reach Cursor SDK agent creation unchanged. |
+| GREEN: non-fast high effort and legacy upgrade | `aa0262f` | Bootstrap pins `effort=high`, `fast=false`; legacy model-ID-only configs resolve to the same exact live variant, and both paths passed live Cursor smokes. |
 
 ## Guarantees
 
