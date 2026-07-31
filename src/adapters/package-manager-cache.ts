@@ -361,8 +361,8 @@ export async function stagePackageManager(
     );
   }
   await addEntrypointShim(validated.executable, binary, spec.version);
-  const digest = await artifactDigest(packageManagerDirectory(corepackHome, spec));
   await makeReadOnly(corepackHome);
+  const digest = await artifactDigest(packageManagerDirectory(corepackHome, spec));
   return {
     name: spec.name,
     binary,

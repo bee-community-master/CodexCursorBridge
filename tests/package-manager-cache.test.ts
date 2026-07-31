@@ -375,6 +375,7 @@ describe("independent package-manager staging", () => {
     );
     await withCorepackHome(fixture.sourceHome, async () => {
       const staged = await stagePackageManager(worktree, cacheRoot, fixture.manifest);
+      await expect(assertStagedPackageManager(staged)).resolves.toBeUndefined();
       await chmod(staged.executable, 0o644);
       await writeFile(staged.executable, "tampered\n", "utf8");
       await expect(assertStagedPackageManager(staged)).rejects.toThrow(/digest changed|integrity|shim changed/i);
