@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import type {
   AttestationData,
@@ -74,7 +75,19 @@ export class WorkflowArtifactWriter {
 
   async writeReport(data: WorkflowReportData): Promise<string> {
     await mkdir(this.#paths.reportsDir, { recursive: true, mode: 0o700 });
-    const reportPath = path.join(this.#paths.reportsDir, `${data.job.id}.md`);
+    const currentAttempt = data.job.currentAttemptId
+      ? data.attempts?.find((attempt) => attempt.id === data.job.currentAttemptId)
+      : undefined;
+    const reportOwner = data.reportOwner ?? (currentAttempt
+      ? { attemptId: currentAttempt.id, workerToken: currentAttempt.workerToken }
+      : undefined);
+    const ownerSuffix = reportOwner
+      ? `.${reportOwner.attemptId}.${createHash("sha256")
+        .update(reportOwner.workerToken)
+        .digest("hex")
+        .slice(0, 16)}`
+      : "";
+    const reportPath = path.join(this.#paths.reportsDir, `${data.job.id}${ownerSuffix}.md`);
     const lines = [
       `# ${data.task.id} Cursor 실행 보고서`,
       "",

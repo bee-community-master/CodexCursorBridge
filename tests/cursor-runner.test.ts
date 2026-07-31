@@ -1,4 +1,4 @@
-import { mkdtemp, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,7 @@ const sdkMocks = vi.hoisted(() => ({
   create: vi.fn(),
   resume: vi.fn(),
   getRun: vi.fn(),
+  listRuns: vi.fn(),
   cancelRun: vi.fn(),
   modelsList: vi.fn(),
 }));
@@ -26,6 +27,7 @@ vi.mock("@cursor/sdk", () => ({
     create: sdkMocks.create,
     resume: sdkMocks.resume,
     getRun: sdkMocks.getRun,
+    listRuns: sdkMocks.listRuns,
     cancelRun: sdkMocks.cancelRun,
   },
   Cursor: { models: { list: sdkMocks.modelsList } },
@@ -53,6 +55,7 @@ beforeEach(() => {
   sdkMocks.create.mockReset().mockRejectedValue(new Error("Unexpected new Cursor agent"));
   sdkMocks.resume.mockReset().mockRejectedValue(new Error("Unexpected Cursor resume"));
   sdkMocks.getRun.mockReset();
+  sdkMocks.listRuns.mockReset();
   sdkMocks.cancelRun.mockReset();
   sdkMocks.modelsList.mockReset().mockResolvedValue([{
     id: "grok-4.5",
@@ -187,6 +190,310 @@ describe("Cursor implementer adapter", () => {
     });
     expect(sdkMocks.getRun).toHaveBeenCalledTimes(2);
     expect(sdkMocks.resume).not.toHaveBeenCalled();
+  });
+
+  it("rebinds and monitors a known active run without force-expiring it", async () => {
+    const activeRun = {
+      id: "run-active",
+      agentId: "agent",
+      status: "running" as const,
+      async *stream(): AsyncGenerator<never, void> { /* No events. */ },
+      wait: vi.fn(async () => ({
+        id: "run-active",
+        agentId: "agent",
+        status: "finished" as const,
+        result: "done",
+      })),
+    };
+    const send = vi.fn();
+    sdkMocks.getRun.mockResolvedValue(activeRun);
+    sdkMocks.resume.mockResolvedValue({
+      agentId: "agent",
+      send,
+      [Symbol.asyncDispose]: vi.fn(async () => undefined),
+    });
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+    const attempt = {
+      ...publishingAttempt(),
+      status: "IMPLEMENTING" as const,
+      cursorAgentId: "agent",
+      cursorRunId: "run-active",
+    };
+
+    const outcome = await adapter.runImplementer({
+      worktree: "/worktree",
+      baseSha: "b".repeat(40),
+      pushBranch: "branch",
+      localBranch: "branch",
+    }, approvedTask({ mode: "new_draft" }), attempt);
+
+    expect(outcome).toMatchObject({
+      status: "needs_input",
+      agentId: "agent",
+      runId: "run-active",
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(sdkMocks.getRun).toHaveBeenCalledOnce();
+  });
+
+  it("rebinds a newer active run after a legacy force_send terminal marker", async () => {
+    const activeRun = {
+      id: "replacement-run",
+      agentId: "agent",
+      status: "running" as const,
+      createdAt: 200,
+      async *stream(): AsyncGenerator<never, void> { /* No events. */ },
+      wait: vi.fn(async () => ({
+        id: "replacement-run",
+        agentId: "agent",
+        status: "finished" as const,
+        result: "done",
+      })),
+    };
+    const olderRun = {
+      ...activeRun,
+      id: "older-run",
+      createdAt: 100,
+    };
+    const send = vi.fn();
+    sdkMocks.getRun.mockResolvedValue({
+      id: "expired-run",
+      agentId: "agent",
+      status: "error",
+      error: { message: "force_send" },
+    });
+    sdkMocks.listRuns.mockResolvedValue({ items: [olderRun, activeRun] });
+    sdkMocks.resume.mockResolvedValue({
+      agentId: "agent",
+      send,
+      [Symbol.asyncDispose]: vi.fn(async () => undefined),
+    });
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+    const attempt = {
+      ...publishingAttempt(),
+      status: "IMPLEMENTING" as const,
+      cursorAgentId: "agent",
+      cursorRunId: "expired-run",
+    };
+
+    const outcome = await adapter.runImplementer({
+      worktree: "/worktree",
+      baseSha: "b".repeat(40),
+      pushBranch: "branch",
+      localBranch: "branch",
+    }, approvedTask({ mode: "new_draft" }), attempt);
+
+    expect(outcome.runId).toBe("replacement-run");
+    expect(send).not.toHaveBeenCalled();
+    expect(store.updateAttempt).toHaveBeenCalledWith(
+      attempt.id,
+      attempt.workerToken,
+      expect.objectContaining({ cursorRunId: "replacement-run" }),
+    );
+  });
+
+  it("finds an orphan active local run and atomically rebinds the attempt before monitoring", async () => {
+    const activeRun = {
+      id: "orphan-run",
+      agentId: "agent",
+      status: "running" as const,
+      async *stream(): AsyncGenerator<never, void> { /* No events. */ },
+      wait: vi.fn(async () => ({
+        id: "orphan-run",
+        agentId: "agent",
+        status: "finished" as const,
+        result: "done",
+      })),
+    };
+    const send = vi.fn();
+    sdkMocks.listRuns.mockResolvedValue({ items: [activeRun] });
+    sdkMocks.resume.mockResolvedValue({
+      agentId: "agent",
+      send,
+      [Symbol.asyncDispose]: vi.fn(async () => undefined),
+    });
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+    const attempt = {
+      ...publishingAttempt(),
+      status: "IMPLEMENTING" as const,
+      cursorAgentId: "agent",
+    };
+
+    const outcome = await adapter.runImplementer({
+      worktree: "/worktree",
+      baseSha: "b".repeat(40),
+      pushBranch: "branch",
+      localBranch: "branch",
+    }, approvedTask({ mode: "new_draft" }), attempt);
+
+    expect(outcome.runId).toBe("orphan-run");
+    expect(send).not.toHaveBeenCalled();
+    expect(store.updateAttempt).toHaveBeenCalledWith(
+      attempt.id,
+      attempt.workerToken,
+      expect.objectContaining({ cursorAgentId: "agent", cursorRunId: "orphan-run" }),
+    );
+  });
+
+  it("reconciles a transient send failure to the active follow-up instead of creating a duplicate", async () => {
+    const activeRun = {
+      id: "follow-up-run",
+      agentId: "agent",
+      status: "running" as const,
+      async *stream(): AsyncGenerator<never, void> { /* No events. */ },
+      wait: vi.fn(async () => ({
+        id: "follow-up-run",
+        agentId: "agent",
+        status: "finished" as const,
+        result: "done",
+      })),
+    };
+    type TestSendOptions = {
+      local?: { force?: boolean; customTools?: Record<string, unknown> };
+    };
+    const send = vi.fn<(prompt: string, options: TestSendOptions) => Promise<unknown>>()
+      .mockRejectedValue(new Error("ConnectError: 503 Service Unavailable"));
+    sdkMocks.create.mockResolvedValue({
+      agentId: "agent",
+      send,
+      [Symbol.asyncDispose]: vi.fn(async () => undefined),
+    });
+    sdkMocks.listRuns.mockResolvedValue({ items: [activeRun] });
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+    const attempt = {
+      ...publishingAttempt(),
+      status: "IMPLEMENTING" as const,
+    };
+
+    const outcome = await adapter.runImplementer({
+      worktree: "/worktree",
+      baseSha: "b".repeat(40),
+      pushBranch: "branch",
+      localBranch: "branch",
+    }, approvedTask({ mode: "new_draft" }), attempt);
+
+    expect(outcome.runId).toBe("follow-up-run");
+    expect(send).toHaveBeenCalledOnce();
+    const options = send.mock.calls[0]?.[1];
+    expect(options?.local?.customTools).toBeDefined();
+    expect(options?.local?.force).toBeUndefined();
+  });
+
+  it("leaves an exhausted ambiguous send uncertain for supervisor recovery", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "cursor-missing-log-"));
+    vi.mocked(store.get).mockReturnValue({
+      logPath: path.join(directory, "missing", "job.log"),
+    } as Job);
+    const send = vi.fn().mockRejectedValue(new Error("ConnectError: 503 Service Unavailable"));
+    sdkMocks.create.mockResolvedValue({
+      agentId: "agent",
+      send,
+      [Symbol.asyncDispose]: vi.fn().mockRejectedValue(new Error("executor dispose failed")),
+    });
+    sdkMocks.listRuns.mockResolvedValue({ items: [] });
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+
+    await expect(adapter.runImplementer({
+      worktree: "/worktree",
+      baseSha: "b".repeat(40),
+      pushBranch: "branch",
+      localBranch: "branch",
+    }, approvedTask({ mode: "new_draft" }), {
+      ...publishingAttempt(),
+      status: "IMPLEMENTING" as const,
+    })).rejects.toThrow(/CURSOR_TRANSPORT_UNCERTAIN/);
+
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  it("preserves a successful outcome when Cursor agent disposal fails", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "cursor-dispose-"));
+    const logPath = path.join(directory, "job.log");
+    vi.mocked(store.get).mockReturnValue({ logPath } as Job);
+    const dispose = vi.fn().mockRejectedValue(new Error("executor dispose failed API_KEY=secret"));
+    const run = {
+      id: "run",
+      agentId: "agent",
+      status: "running" as const,
+      async *stream(): AsyncGenerator<never, void> { /* No events. */ },
+      wait: vi.fn(async () => ({
+        id: "run",
+        agentId: "agent",
+        status: "finished" as const,
+        result: "done",
+      })),
+    };
+    sdkMocks.create.mockResolvedValue({
+      agentId: "agent",
+      send: vi.fn(async () => run),
+      [Symbol.asyncDispose]: dispose,
+    });
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+
+    await expect(adapter.runImplementer({
+      worktree: "/worktree",
+      baseSha: "b".repeat(40),
+      pushBranch: "branch",
+      localBranch: "branch",
+    }, approvedTask({ mode: "new_draft" }), {
+      ...publishingAttempt(),
+      status: "IMPLEMENTING" as const,
+    })).resolves.toMatchObject({
+      status: "needs_input",
+      runId: "run",
+    });
+
+    expect(dispose).toHaveBeenCalledOnce();
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("Cursor agent disposal failed");
+    expect(log).toContain("API_KEY=[REDACTED]");
+    expect(log).not.toContain("API_KEY=secret");
+  });
+
+  it("preserves an active run outcome when event logging fails", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "cursor-missing-event-log-"));
+    vi.mocked(store.get).mockReturnValue({
+      logPath: path.join(directory, "missing", "job.log"),
+    } as Job);
+    const activeRun = {
+      id: "active-run",
+      agentId: "agent",
+      status: "running" as const,
+      async *stream(): AsyncGenerator<{ type: string; name: string }, void> {
+        yield { type: "assistant", name: "message" };
+      },
+      wait: vi.fn(async () => ({
+        id: "active-run",
+        agentId: "agent",
+        status: "finished" as const,
+        result: "done",
+      })),
+    };
+    const send = vi.fn();
+    sdkMocks.getRun.mockResolvedValue(activeRun);
+    sdkMocks.resume.mockResolvedValue({
+      agentId: "agent",
+      send,
+      [Symbol.asyncDispose]: vi.fn(async () => undefined),
+    });
+    const adapter = new RealWorkflowAdapter(paths, config, store, "job");
+
+    await expect(adapter.runImplementer({
+      worktree: "/worktree",
+      baseSha: "b".repeat(40),
+      pushBranch: "branch",
+      localBranch: "branch",
+    }, approvedTask({ mode: "new_draft" }), {
+      ...publishingAttempt(),
+      status: "IMPLEMENTING" as const,
+      cursorAgentId: "agent",
+      cursorRunId: "active-run",
+    })).resolves.toMatchObject({
+      status: "needs_input",
+      runId: "active-run",
+    });
+
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("restores a terminal Cursor error instead of starting a follow-up run", async () => {

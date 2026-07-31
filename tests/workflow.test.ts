@@ -1,8 +1,9 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RepositoryConfig } from "../src/config.js";
+import { WorkflowArtifactWriter } from "../src/adapters/workflow-artifact-writer.js";
 import { JobStore, type ClaimedWork } from "../src/state.js";
 import type { Task } from "../src/task.js";
 import { executeWorkflow, type WorkflowAdapter } from "../src/workflow.js";
@@ -132,6 +133,7 @@ describe("workflow orchestration", () => {
 
     expect(store.get(claim.job.id)?.status).toBe("STALE_SPEC");
     expect(store.get(claim.job.id)?.errorMessage).toMatch(/existing PR head changed/i);
+    expect(store.get(claim.job.id)?.reportPath).toBe("/report.md");
     expect(store.getAttempt(claim.attempt.id)?.status).toBe("FAILED");
     expect(store.getAttempt(claim.attempt.id)?.errorMessage)
       .toMatch(/existing PR head changed/i);
@@ -322,6 +324,147 @@ describe("workflow orchestration", () => {
     expect(store.get(claim.job.id)?.errorMessage)
       .toBe("A stop condition requires production access");
     expect(fake.publish).not.toHaveBeenCalled();
+  });
+
+  it("keeps an ambiguous Cursor transport failure reclaimable instead of marking it FAILED", async () => {
+    const { store, claim } = await fixture();
+    const fake = adapter([["src/demo.ts"]]);
+    vi.mocked(fake.runImplementer).mockRejectedValueOnce(
+      new Error("CURSOR_TRANSPORT_UNCERTAIN: send accepted but readback timed out"),
+    );
+
+    await executeWorkflow(store, claim, task, repository, fake);
+
+    expect(store.get(claim.job.id)).toMatchObject({
+      status: "IMPLEMENTING",
+      reportPath: "/report.md",
+    });
+    expect(store.getAttempt(claim.attempt.id)?.status).toBe("IMPLEMENTING");
+    expect(store.listEvents(claim.job.id).some(
+      (event) => event.type === "CURSOR_TRANSPORT_UNCERTAIN",
+    )).toBe(true);
+    expect(fake.publish).not.toHaveBeenCalled();
+  });
+
+  it("keeps uncertainty reclaimable when diagnostic event persistence fails", async () => {
+    const { store, claim } = await fixture();
+    const fake = adapter([["src/demo.ts"]]);
+    const recordEvent = store.recordEvent.bind(store);
+    vi.spyOn(store, "recordEvent").mockImplementation((jobId, attemptId, type, data) => {
+      if (type === "CURSOR_TRANSPORT_UNCERTAIN") {
+        throw new Error("event ledger temporarily unavailable");
+      }
+      recordEvent(jobId, attemptId, type, data);
+    });
+    vi.mocked(fake.runImplementer).mockRejectedValueOnce(
+      new Error("CURSOR_TRANSPORT_UNCERTAIN: send accepted but readback timed out"),
+    );
+
+    await executeWorkflow(store, claim, task, repository, fake);
+
+    expect(store.get(claim.job.id)).toMatchObject({
+      status: "IMPLEMENTING",
+      reportPath: "/report.md",
+    });
+    expect(store.getAttempt(claim.attempt.id)?.status).toBe("IMPLEMENTING");
+  });
+
+  it("does not let a stale uncertainty report overwrite a replacement report", async () => {
+    const { store, claim } = await fixture();
+    const fake = adapter([["src/demo.ts"]]);
+    let reportReady!: () => void;
+    let releaseReport!: (path: string) => void;
+    const reportStarted = new Promise<void>((resolve) => {
+      reportReady = resolve;
+    });
+    const reportResult = new Promise<string>((resolve) => {
+      releaseReport = resolve;
+    });
+    vi.mocked(fake.runImplementer).mockRejectedValueOnce(
+      new Error("CURSOR_TRANSPORT_UNCERTAIN: send accepted but readback timed out"),
+    );
+    vi.mocked(fake.writeReport).mockImplementationOnce(async () => {
+      reportReady();
+      return reportResult;
+    });
+
+    const oldExecution = executeWorkflow(store, claim, task, repository, fake);
+    await reportStarted;
+    const reclaimed = store.claimNext(
+      "replacement-worker",
+      60_000,
+      new Date(Date.now() + 120_000),
+    );
+    expect(reclaimed?.resumed).toBe(true);
+    expect(store.attachReportIfOwned(
+      claim.job.id,
+      reclaimed!.attempt.id,
+      reclaimed!.attempt.workerToken,
+      "/newer-final-report.md",
+    )).toBe(true);
+
+    releaseReport("/stale-uncertain-report.md");
+    await oldExecution;
+
+    expect(store.get(claim.job.id)).toMatchObject({
+      status: "IMPLEMENTING",
+      reportPath: "/newer-final-report.md",
+      currentAttemptId: claim.attempt.id,
+    });
+  });
+
+  it("keeps stale uncertainty contents isolated from a replacement artifact", async () => {
+    const { store, claim } = await fixture();
+    const root = await mkdtemp(path.join(tmpdir(), "cursor-report-race-"));
+    const writer = new WorkflowArtifactWriter({
+      projectRoot: root,
+      home: root,
+      configFile: path.join(root, "config.json"),
+      databaseFile: path.join(root, "jobs.sqlite"),
+      logsDir: path.join(root, "logs"),
+      reportsDir: path.join(root, "reports"),
+      worktreesDir: path.join(root, "worktrees"),
+      tasksDir: path.join(root, "tasks"),
+    });
+    const fake = adapter([["src/demo.ts"]]);
+    vi.mocked(fake.runImplementer).mockRejectedValueOnce(
+      new Error("CURSOR_TRANSPORT_UNCERTAIN: send accepted but readback timed out"),
+    );
+    let replacementReportPath: string | undefined;
+    vi.mocked(fake.writeReport).mockImplementationOnce(async (data) => {
+      const reclaimed = store.claimNext(
+        "replacement-worker",
+        60_000,
+        new Date(Date.now() + 120_000),
+      );
+      expect(reclaimed?.resumed).toBe(true);
+      const replacementJob = store.get(claim.job.id)!;
+      const replacementAttempt = store.getAttempt(reclaimed!.attempt.id)!;
+      replacementReportPath = await writer.writeReport({
+        job: replacementJob,
+        task,
+        attempts: [replacementAttempt],
+        error: "new replacement outcome",
+        reportOwner: {
+          attemptId: replacementAttempt.id,
+          workerToken: replacementAttempt.workerToken,
+        },
+      });
+      expect(store.attachReportIfOwned(
+        claim.job.id,
+        replacementAttempt.id,
+        replacementAttempt.workerToken,
+        replacementReportPath,
+      )).toBe(true);
+      return writer.writeReport(data);
+    });
+
+    await executeWorkflow(store, claim, task, repository, fake);
+
+    expect(replacementReportPath).toBeDefined();
+    expect(store.get(claim.job.id)?.reportPath).toBe(replacementReportPath);
+    expect(await readFile(replacementReportPath!, "utf8"))
+      .toContain("new replacement outcome");
   });
 
   it("reclaims a verification phase without rerunning the implementer", async () => {
@@ -577,6 +720,7 @@ describe("workflow orchestration", () => {
 
     expect(store.get(claim.job.id)?.status).toBe("FAILED");
     expect(store.get(claim.job.id)?.errorMessage).toMatch(/draft/i);
+    expect(store.get(claim.job.id)?.reportPath).toBe("/report.md");
     expect(fake.writeAttestation).not.toHaveBeenCalled();
   });
 

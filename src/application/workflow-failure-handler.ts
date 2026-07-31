@@ -39,6 +39,10 @@ function publicationNeedsFinalization(
     && job.treeHash !== undefined;
 }
 
+function isUncertainCursorTransportFailure(message: string): boolean {
+  return message.startsWith("CURSOR_TRANSPORT_UNCERTAIN:");
+}
+
 class WorkflowFailureHandler {
   readonly #context: WorkflowFailureContext;
 
@@ -51,18 +55,32 @@ class WorkflowFailureHandler {
     const message = safeErrorMessage(error);
     const currentJob = store.get(jobId);
     const currentAttempt = store.getAttempt(attempt.id);
+    const currentAttemptId = currentAttempt?.id;
     if (currentAttempt && currentAttempt.workerToken !== workerToken) return;
     if (currentJob?.status === "CANCEL_REQUESTED" && currentAttempt) {
       await this.#confirmCancellation(currentAttempt);
       return;
     }
     if (publicationNeedsFinalization(currentJob, currentAttempt)) {
-      store.recordEvent(
+      this.#recordEventSafely(
         jobId,
         currentAttempt.id,
         "DELIVERY_FINALIZATION_DEFERRED",
         { error: message },
       );
+      return;
+    }
+    if (isUncertainCursorTransportFailure(message)) {
+      // The SDK may have accepted the request while the supervisor lost its
+      // transport. Keep the active attempt lease-fenced and let the next
+      // supervisor reclaim/reconcile the durable local run instead of turning
+      // an unknown outcome into a false terminal failure.
+      if (currentAttemptId) {
+        this.#recordEventSafely(jobId, currentAttemptId, "CURSOR_TRANSPORT_UNCERTAIN", {
+          error: message,
+        });
+      }
+      await this.#writeReport(message);
       return;
     }
     if (!this.#markFailed(currentJob, currentAttempt, message)) return;
@@ -75,12 +93,26 @@ class WorkflowFailureHandler {
       await adapter.cancel(attempt);
       store.confirmCancellation(jobId, attempt.id, workerToken);
     } catch (error) {
-      store.recordEvent(
+      this.#recordEventSafely(
         jobId,
         attempt.id,
         "CANCELLATION_CONFIRMATION_FAILED",
         { error: safeErrorMessage(error) },
       );
+    }
+  }
+
+  #recordEventSafely(
+    jobId: string,
+    attemptId: string,
+    type: string,
+    data: Record<string, unknown>,
+  ): void {
+    try {
+      this.#context.store.recordEvent(jobId, attemptId, type, data);
+    } catch {
+      // Diagnostic events must never turn a recoverable workflow state into a
+      // false terminal failure when the event ledger is unavailable.
     }
   }
 
@@ -149,8 +181,17 @@ class WorkflowFailureHandler {
         attempts: store.listAttempts(jobId),
         ...(cursorSummary ? { cursorSummary } : {}),
         error: message,
+        reportOwner: {
+          attemptId: this.#context.attempt.id,
+          workerToken: this.#context.workerToken,
+        },
       });
-      store.update(jobId, { reportPath });
+      store.attachReportIfOwned(
+        jobId,
+        this.#context.attempt.id,
+        this.#context.workerToken,
+        reportPath,
+      );
     } catch {
       // The primary job error remains authoritative if report persistence also fails.
     }

@@ -27,6 +27,14 @@ import {
   redactSensitiveText,
   safeErrorMessage,
 } from "../application/redaction.js";
+import {
+  CURSOR_TRANSPORT_MAX_ATTEMPTS,
+  CursorTransportUncertainError,
+  isTransientCursorTransportError,
+  transportFailureDetails,
+  transportFailureSummary,
+  transportRetryDelayMs,
+} from "./cursor-transport.js";
 import type { PreparedWorktreeGuard } from "./prepared-worktree-guard.js";
 import type { WorkflowLogger } from "./workflow-logger.js";
 
@@ -40,6 +48,11 @@ interface LocalCursorRunOptions {
   cwd: string;
   store: JsonlLocalAgentStore;
 }
+
+type RecoveredCursorRun =
+  | { kind: "active"; run: Run }
+  | { kind: "outcome"; outcome: ImplementerOutcome }
+  | { kind: "new"; previousRunId?: string };
 
 const outcomeSchema = z.object({
   status: z.enum(["completed", "blocked", "needs_input"]),
@@ -56,6 +69,21 @@ function hasPersistedOutcome(
 ): attempt is Attempt & Required<Pick<Attempt, "outcome" | "outcomeSummary">> {
   return attempt.outcome !== undefined
     && attempt.outcomeSummary !== undefined;
+}
+
+function isForceSendMarker(error: unknown): boolean {
+  const candidate = error as { message?: unknown; code?: unknown } | undefined;
+  const values = [
+    candidate?.message,
+    candidate?.code,
+    error instanceof Error ? error.message : undefined,
+  ];
+  return values.some((value) =>
+    typeof value === "string" && /\bforce[_ -]?send\b/i.test(value));
+}
+
+function isRecoverableCursorRunError(error: unknown): boolean {
+  return isTransientCursorTransportError(error) || isForceSendMarker(error);
 }
 
 function recoveredRunMetadata(
@@ -100,6 +128,9 @@ function restoredOutcome(
       ),
       reason: "Cursor finished without submitting a durable structured outcome.",
     };
+  }
+  if (run.status === "error" && isRecoverableCursorRunError(run.error)) {
+    return undefined;
   }
   if (run.status === "error" || run.status === "cancelled") {
     throw new Error(run.error?.message ?? `Cursor run ended with ${run.status}`);
@@ -176,10 +207,15 @@ export class CursorImplementer {
         });
       }),
     };
-    const recovered = await this.#recoverDurableOutcome(prepared, attempt);
-    if (recovered) return recovered;
+    const recovered = await this.#recoverDurableRun(prepared, attempt);
+    if (recovered.kind === "outcome") return recovered.outcome;
 
-    const agent = await this.#createOrResumeAgent(prepared, task, attempt, customTools);
+    const agent = await this.#createOrResumeAgentWithRetry(
+      prepared,
+      task,
+      attempt,
+      customTools,
+    );
     try {
       const prompt = repairFeedback
         ? [
@@ -199,20 +235,53 @@ export class CursorImplementer {
           stringify(task, { lineWidth: 100 }),
           "--- END TASK ---",
         ].join("\n\n");
-      const run = await agent.send(prompt, {
-        idempotencyKey: `bridge-attempt:${attempt.id}`,
-        ...(attempt.cursorRunId ? { local: { force: true, customTools } } : {}),
-      });
+      const run = recovered.kind === "active"
+        ? recovered.run
+        : await this.#sendWithTransportRetry(
+          agent,
+          prompt,
+          prepared,
+          attempt,
+          customTools,
+          recovered.previousRunId,
+        );
       this.#activeRuns.set(attempt.id, run);
       this.#store.updateAttempt(attempt.id, attempt.workerToken, {
         cursorAgentId: agent.agentId,
         cursorRunId: run.id,
         ...(run.requestId ? { cursorRequestId: run.requestId } : {}),
       });
-      return await this.#waitForOutcome(run, agent, () => submitted);
+      if (run.status !== "running") {
+        const terminalOutcome = restoredOutcome(
+          run,
+          attempt,
+          agent.agentId,
+          run.id,
+        );
+        if (terminalOutcome) return terminalOutcome;
+        if (run.status === "error" && isRecoverableCursorRunError(run.error)) {
+          throw new CursorTransportUncertainError(
+            `Cursor send returned a terminal transport error for run ${run.id}.`,
+          );
+        }
+      }
+      return await this.#waitForOutcomeWithTransportRetry(
+        run,
+        agent,
+        prepared,
+        attempt,
+        () => submitted,
+      );
     } finally {
       this.#activeRuns.delete(attempt.id);
-      await agent[Symbol.asyncDispose]();
+      try {
+        await agent[Symbol.asyncDispose]();
+      } catch (error) {
+        // Disposal is best-effort cleanup. Never let an executor shutdown
+        // failure replace the primary run outcome or an uncertain transport
+        // error; the redacted diagnostic is enough for later inspection.
+        await this.#logSafely(`Cursor agent disposal failed: ${safeErrorMessage(error)}`);
+      }
     }
   }
 
@@ -270,23 +339,74 @@ export class CursorImplementer {
       : Agent.create({ ...options, idempotencyKey: `bridge-agent:${attempt.id}` });
   }
 
-  async #recoverDurableOutcome(
+  async #createOrResumeAgentWithRetry(
+    prepared: PreparedWorktree,
+    task: ApprovedTask,
+    attempt: Attempt,
+    customTools: Record<string, SDKCustomTool>,
+  ): Promise<SDKAgent> {
+    let lastError: unknown;
+    for (let retry = 1; retry <= CURSOR_TRANSPORT_MAX_ATTEMPTS; retry += 1) {
+      try {
+        return await this.#createOrResumeAgent(prepared, task, attempt, customTools);
+      } catch (error) {
+        lastError = error;
+        if (!isTransientCursorTransportError(error)) throw error;
+        await this.#logTransportFailure("agent-resume", retry, error);
+        if (retry === CURSOR_TRANSPORT_MAX_ATTEMPTS) break;
+        await this.#delayAfterTransportFailure(retry);
+      }
+    }
+    throw new CursorTransportUncertainError(
+      `Cursor agent could not be resumed after ${CURSOR_TRANSPORT_MAX_ATTEMPTS} attempts: ${safeErrorMessage(lastError)}`,
+    );
+  }
+
+  async #recoverDurableRun(
     prepared: PreparedWorktree,
     attempt: Attempt,
-  ): Promise<ImplementerOutcome | undefined> {
+  ): Promise<RecoveredCursorRun> {
     const agentId = attempt.cursorAgentId;
     const runId = attempt.cursorRunId;
-    if (!agentId || !runId) return undefined;
     const options: LocalCursorRunOptions = {
       runtime: "local",
       cwd: prepared.worktree,
       store: this.#cursorStore,
     };
-    let priorRun = await this.#readPriorRun(runId, options);
-    if (priorRun.status === "running" && hasPersistedOutcome(attempt)) {
-      priorRun = await this.#stopPriorRun(runId, options);
+    if (runId) {
+      let priorRun = await this.#readPriorRun(runId, options);
+      if (agentId && priorRun.agentId !== agentId) {
+        await this.#logSafely(
+          `Cursor run identity mismatch: Attempt agent ${agentId}, local run agent ${priorRun.agentId}.`,
+        );
+        throw new CursorTransportUncertainError(
+          `Cursor run ${runId} does not belong to the durable agent identity.`,
+        );
+      }
+      const recoveredAgentId = agentId ?? priorRun.agentId;
+      if (priorRun.status === "running" && hasPersistedOutcome(attempt)) {
+        priorRun = await this.#stopPriorRun(runId, options);
+      }
+      if (priorRun.status === "running") return { kind: "active", run: priorRun };
+      const outcome = restoredOutcome(priorRun, attempt, recoveredAgentId, runId);
+      if (outcome) return { kind: "outcome", outcome };
+
+      // A terminal transport error is safe to follow up only after the local
+      // store confirms that no newer run is active for this agent.
+      const active = await this.#findActiveRun(recoveredAgentId, options);
+      if (active) {
+        await this.#bindRun(attempt, recoveredAgentId, active);
+        return { kind: "active", run: active };
+      }
+      return { kind: "new", previousRunId: runId };
     }
-    return restoredOutcome(priorRun, attempt, agentId, runId);
+    if (!agentId) return { kind: "new" };
+    const active = await this.#findActiveRun(agentId, options);
+    if (active) {
+      await this.#bindRun(attempt, agentId, active);
+      return { kind: "active", run: active };
+    }
+    return { kind: "new" };
   }
 
   async #readPriorRun(
@@ -297,9 +417,186 @@ export class CursorImplementer {
       return await Agent.getRun(runId, options);
     } catch (error) {
       const detail = safeErrorMessage(error);
-      await this.#logger.log(`Could not safely read prior Cursor run: ${detail}`);
+      await this.#logSafely(`Could not safely read prior Cursor run: ${detail}`);
+      if (isRecoverableCursorRunError(error)) {
+        throw new CursorTransportUncertainError(
+          `Could not safely recover the prior Cursor run: ${detail}`,
+        );
+      }
       throw new Error(`Could not safely recover the prior Cursor run: ${detail}`);
     }
+  }
+
+  async #findActiveRun(
+    agentId: string,
+    options: LocalCursorRunOptions,
+  ): Promise<Run | undefined> {
+    try {
+      const listed = await Agent.listRuns(agentId, options);
+      const active = listed.items
+        .filter((run) => run.status === "running" && run.agentId === agentId)
+        .sort((left, right) => {
+          const leftCreated = left.createdAt ?? 0;
+          const rightCreated = right.createdAt ?? 0;
+          return rightCreated - leftCreated || right.id.localeCompare(left.id);
+        });
+      return active[0];
+    } catch (error) {
+      const detail = safeErrorMessage(error);
+      await this.#logSafely(`Could not reconcile local Cursor runs: ${detail}`);
+      if (isRecoverableCursorRunError(error)) {
+        throw new CursorTransportUncertainError(
+          `Could not reconcile local Cursor runs: ${detail}`,
+        );
+      }
+      throw new Error(`Could not reconcile local Cursor runs: ${detail}`);
+    }
+  }
+
+  async #bindRun(attempt: Attempt, agentId: string, run: Run): Promise<void> {
+    this.#store.updateAttempt(attempt.id, attempt.workerToken, {
+      cursorAgentId: agentId,
+      cursorRunId: run.id,
+      ...(run.requestId ? { cursorRequestId: run.requestId } : {}),
+    });
+    await this.#logSafely(`Rebound active Cursor run ${run.id} for agent ${agentId}.`);
+  }
+
+  async #sendWithTransportRetry(
+    agent: SDKAgent,
+    prompt: string,
+    prepared: PreparedWorktree,
+    attempt: Attempt,
+    customTools: Record<string, SDKCustomTool>,
+    previousRunId?: string,
+  ): Promise<Run> {
+    const idempotencyKey = previousRunId
+      ? `bridge-follow-up:${attempt.id}:${previousRunId}`
+      : `bridge-attempt:${attempt.id}`;
+    let lastError: unknown;
+    for (let retry = 1; retry <= CURSOR_TRANSPORT_MAX_ATTEMPTS; retry += 1) {
+      try {
+        const run = await agent.send(prompt, {
+          idempotencyKey,
+          local: { customTools },
+        });
+        if (run.status !== "running") {
+          const active = await this.#findActiveRun(agent.agentId, {
+            runtime: "local",
+            cwd: prepared.worktree,
+            store: this.#cursorStore,
+          });
+          if (active && active.id !== run.id) {
+            await this.#logSafely(
+              `Ignored terminal Cursor send result ${run.id}; rebound active run ${active.id}.`,
+            );
+            return active;
+          }
+        }
+        return run;
+      } catch (error) {
+        lastError = error;
+        if (!isRecoverableCursorRunError(error)) throw error;
+        await this.#logTransportFailure("send", retry, error);
+        const active = await this.#findActiveRun(agent.agentId, {
+          runtime: "local",
+          cwd: prepared.worktree,
+          store: this.#cursorStore,
+        });
+        if (active) return active;
+        if (retry === CURSOR_TRANSPORT_MAX_ATTEMPTS) break;
+        await this.#delayAfterTransportFailure(retry);
+      }
+    }
+    throw new CursorTransportUncertainError(
+      `Cursor send remained ambiguous after ${CURSOR_TRANSPORT_MAX_ATTEMPTS} attempts: ${transportFailureSummary(lastError)}`,
+    );
+  }
+
+  async #waitForOutcomeWithTransportRetry(
+    run: Run,
+    agent: SDKAgent,
+    prepared: PreparedWorktree,
+    attempt: Attempt,
+    submitted: () => z.infer<typeof outcomeSchema> | undefined,
+  ): Promise<ImplementerOutcome> {
+    let current = run;
+    for (let retry = 1; retry <= CURSOR_TRANSPORT_MAX_ATTEMPTS; retry += 1) {
+      try {
+        return await this.#waitForOutcome(current, agent, submitted);
+      } catch (error) {
+        if (!isRecoverableCursorRunError(error)) throw error;
+        await this.#logTransportFailure("monitor", retry, error);
+        const options: LocalCursorRunOptions = {
+          runtime: "local",
+          cwd: prepared.worktree,
+          store: this.#cursorStore,
+        };
+        const rebound = await this.#reconcileRunAfterTransport(
+          attempt,
+          agent.agentId,
+          current.id,
+          options,
+        );
+        if (rebound.kind === "outcome") return rebound.outcome;
+        if (rebound.kind === "active") {
+          current = rebound.run;
+          if (retry < CURSOR_TRANSPORT_MAX_ATTEMPTS) {
+            await this.#delayAfterTransportFailure(retry);
+            continue;
+          }
+        }
+        throw new CursorTransportUncertainError(
+          `Cursor run ${current.id} could not be monitored after a transport failure: ${transportFailureSummary(error)}`,
+        );
+      }
+    }
+    throw new CursorTransportUncertainError(
+      `Cursor run ${current.id} could not be monitored after ${CURSOR_TRANSPORT_MAX_ATTEMPTS} attempts.`,
+    );
+  }
+
+  async #reconcileRunAfterTransport(
+    attempt: Attempt,
+    agentId: string,
+    runId: string,
+    options: LocalCursorRunOptions,
+  ): Promise<RecoveredCursorRun> {
+    const run = await this.#readPriorRun(runId, options);
+    if (run.status === "running") return { kind: "active", run };
+    const outcome = restoredOutcome(run, attempt, agentId, runId);
+    if (outcome) return { kind: "outcome", outcome };
+    const active = await this.#findActiveRun(agentId, options);
+    if (active) {
+      await this.#bindRun(attempt, agentId, active);
+      return { kind: "active", run: active };
+    }
+    return { kind: "new", previousRunId: runId };
+  }
+
+  async #logTransportFailure(
+    operation: string,
+    retry: number,
+    error: unknown,
+  ): Promise<void> {
+    await this.#logSafely(
+      `CURSOR_TRANSPORT_RETRY operation=${operation} attempt=${retry}/${CURSOR_TRANSPORT_MAX_ATTEMPTS} error=${transportFailureDetails(error)}`,
+    );
+  }
+
+  async #logSafely(message: string): Promise<void> {
+    try {
+      await this.#logger.log(message);
+    } catch {
+      // Diagnostics are non-authoritative; logging failures must not alter the
+      // durable run outcome or hide an uncertain transport error.
+    }
+  }
+
+  async #delayAfterTransportFailure(retry: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, transportRetryDelayMs(retry));
+    });
   }
 
   async #stopPriorRun(
@@ -329,7 +626,7 @@ export class CursorImplementer {
       );
     }
     if (cancellationFailure) {
-      await this.#logger.log(
+      await this.#logSafely(
         "Cursor cancellation reported an error, but terminal readback confirmed the run stopped.",
       );
     }
@@ -347,14 +644,14 @@ export class CursorImplementer {
       cancellationCheckActive = true;
       void run.cancel()
         .catch((error: unknown) =>
-          this.#logger.log(`Cursor cancellation failed: ${safeErrorMessage(error)}`))
+          this.#logSafely(`Cursor cancellation failed: ${safeErrorMessage(error)}`))
         .finally(() => {
           cancellationCheckActive = false;
         });
     }, 500);
     cancellationTimer.unref();
     try {
-      for await (const event of run.stream()) await this.#logger.log(eventSummary(event));
+      for await (const event of run.stream()) await this.#logSafely(eventSummary(event));
       const result = await run.wait();
       if (result.status === "cancelled" && this.#store.isCancellationRequested(this.#jobId)) {
         return {
