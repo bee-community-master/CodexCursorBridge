@@ -28,6 +28,10 @@ export const paths: RuntimePaths = {
 
 export const config: MachineConfig = {
   cursorModelId: "grok-4.5",
+  cursorModelParams: [
+    { id: "effort", value: "high" },
+    { id: "fast", value: "true" },
+  ],
   repositories: {
     demo: {
       root: "/repo",

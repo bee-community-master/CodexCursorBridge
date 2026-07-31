@@ -57,6 +57,14 @@ beforeEach(() => {
   sdkMocks.modelsList.mockReset().mockResolvedValue([{
     id: "grok-4.5",
     displayName: "Grok 4.5",
+    variants: [{
+      params: [
+        { id: "effort", value: "high" },
+        { id: "fast", value: "true" },
+      ],
+      displayName: "Grok 4.5 High Fast",
+      isDefault: true,
+    }],
   }]);
 });
 
@@ -253,12 +261,20 @@ describe("Cursor implementer adapter", () => {
   it("redacts a structured Cursor outcome before persisting it", async () => {
     const dispose = vi.fn(async () => undefined);
     sdkMocks.create.mockImplementation(async (options: {
+      model?: { id: string; params?: Array<{ id: string; value: string }> };
       local?: {
         customTools?: Record<string, { execute: (args: Record<string, string>) => unknown }>;
         settingSources?: string[];
         sandboxOptions?: { enabled: boolean };
       };
     }) => {
+      expect(options.model).toEqual({
+        id: "grok-4.5",
+        params: [
+          { id: "effort", value: "high" },
+          { id: "fast", value: "true" },
+        ],
+      });
       expect(options.local).toMatchObject({
         settingSources: [],
         sandboxOptions: { enabled: true },

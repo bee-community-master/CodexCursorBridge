@@ -20,13 +20,20 @@ describe("portable main Codex MCP registration", () => {
     const directory = await mkdtemp(path.join(tmpdir(), "cursor-bootstrap-config-"));
     const configFile = path.join(directory, "config.json");
 
-    await expect(loadBootstrapConfig(configFile, "grok-new")).resolves.toEqual({
+    await expect(loadBootstrapConfig(configFile, {
+      id: "grok-new",
+      params: [{ id: "effort", value: "high" }],
+    })).resolves.toEqual({
       cursorModelId: "grok-new",
+      cursorModelParams: [{ id: "effort", value: "high" }],
       repositories: {},
     });
 
     await writeFile(configFile, "{not-json", "utf8");
-    await expect(loadBootstrapConfig(configFile, "grok-new")).rejects.toThrow();
+    await expect(loadBootstrapConfig(configFile, {
+      id: "grok-new",
+      params: [{ id: "effort", value: "high" }],
+    })).rejects.toThrow();
 
     await writeFile(configFile, JSON.stringify({
       cursorModelId: "grok-old",
@@ -34,8 +41,12 @@ describe("portable main Codex MCP registration", () => {
         demo: { root: "/repo", origin: "owner/demo", defaultBranch: "main" },
       },
     }), "utf8");
-    await expect(loadBootstrapConfig(configFile, "grok-new")).resolves.toMatchObject({
+    await expect(loadBootstrapConfig(configFile, {
+      id: "grok-new",
+      params: [{ id: "effort", value: "high" }],
+    })).resolves.toMatchObject({
       cursorModelId: "grok-new",
+      cursorModelParams: [{ id: "effort", value: "high" }],
       repositories: { demo: { root: "/repo" } },
     });
   });

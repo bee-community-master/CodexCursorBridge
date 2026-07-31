@@ -14,10 +14,48 @@ describe("machine-local configuration", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "cursor-config-"));
     await chmod(dir, 0o755);
     const file = path.join(dir, "config.json");
-    await saveMachineConfig(file, { cursorModelId: "grok-4.5", repositories: {} });
+    await saveMachineConfig(file, {
+      cursorModelId: "grok-4.5",
+      cursorModelParams: [
+        { id: "effort", value: "high" },
+        { id: "fast", value: "true" },
+      ],
+      repositories: {},
+    });
     expect((await stat(dir)).mode & 0o777).toBe(0o700);
     expect((await stat(file)).mode & 0o777).toBe(0o600);
-    expect(await loadMachineConfig(file)).toEqual({ cursorModelId: "grok-4.5", repositories: {} });
+    expect(await loadMachineConfig(file)).toEqual({
+      cursorModelId: "grok-4.5",
+      cursorModelParams: [
+        { id: "effort", value: "high" },
+        { id: "fast", value: "true" },
+      ],
+      repositories: {},
+    });
+  });
+
+  it("keeps legacy model-id-only configs valid and rejects unsafe model parameters", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "cursor-config-legacy-"));
+    const file = path.join(dir, "config.json");
+    await saveMachineConfig(file, { cursorModelId: "grok-4.5", repositories: {} });
+    await expect(loadMachineConfig(file)).resolves.toEqual({
+      cursorModelId: "grok-4.5",
+      repositories: {},
+    });
+
+    await expect(saveMachineConfig(file, {
+      cursorModelId: "grok-4.5",
+      cursorModelParams: [
+        { id: "effort", value: "high" },
+        { id: "effort", value: "low" },
+      ],
+      repositories: {},
+    })).rejects.toThrow(/duplicate/i);
+    await expect(saveMachineConfig(file, {
+      cursorModelId: "grok-4.5",
+      cursorModelParams: [{ id: "effort", value: "high\tinjected" }],
+      repositories: {},
+    })).rejects.toThrow(/control/i);
   });
 
   it("adds repository aliases without overwriting an existing alias", () => {
