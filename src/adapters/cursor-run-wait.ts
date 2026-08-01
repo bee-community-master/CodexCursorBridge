@@ -106,7 +106,7 @@ interface StreamFailureCancellation {
   fenceKey: string;
 }
 
-async function recoverStreamFailure(
+async function recoverCancellationAfterError(
   run: Run,
   attempt: Attempt,
   agentId: string,
@@ -115,6 +115,8 @@ async function recoverStreamFailure(
   logEvent: (eventKey: string, message: string) => Promise<void>,
   logSafely: (message: string) => Promise<void>,
   cancellation: StreamFailureCancellation,
+  failureDetail: string,
+  drainWithoutCancellation: boolean,
 ): Promise<ImplementerOutcome | undefined> {
   cancellation.attempt();
   if (
@@ -122,14 +124,14 @@ async function recoverStreamFailure(
     && !cancellation.recoveryRequested()
     && !cancellation.fence?.has(cancellation.fenceKey)
   ) {
-    if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
+    if (drainWithoutCancellation && !await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
       throw new CursorRunEventDeliveryUncertainError(run.id);
     }
     return undefined;
   }
   if (!cancellation.recoveryRequested()) {
     cancellation.requestRecovery(
-      `CURSOR_TRANSPORT_UNCERTAIN: Cursor stream failed after cancellation was requested for run ${run.id}; RECOVERY_REQUIRED: no further cancel mutation was attempted.`,
+      `CURSOR_TRANSPORT_UNCERTAIN: ${failureDetail} after cancellation was requested for run ${run.id}; RECOVERY_REQUIRED: no further cancel mutation was attempted.`,
     );
   }
   await cancellation.settle();
@@ -337,6 +339,18 @@ export async function waitForOutcome(
   const cancellationTimer = setInterval(attemptCancellation, cancellationPollMs);
   cancellationTimer.unref();
   attemptCancellation();
+  const recoverCancellationError = (failureDetail: string, drainWithoutCancellation: boolean): Promise<ImplementerOutcome | undefined> =>
+    recoverCancellationAfterError(
+      run, attempt, agent.agentId, jobId, store, logEvent, logSafely,
+      {
+        attempt: attemptCancellation, attempted: () => cancellationAttempted,
+        recoveryRequested: () => cancellationRecoveryRequested,
+        requestRecovery: requestCancellationRecovery,
+        settle: () => settleCancellationAfterError(() => cancellationSettlement),
+        detail: () => cancellationRecoveryDetail, fence: cancellationFence,
+        fenceKey: cancellationFenceKey,
+      }, failureDetail, drainWithoutCancellation,
+    );
   try {
     await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id);
     try {
@@ -364,25 +378,7 @@ export async function waitForOutcome(
         );
       }
     } catch (error) {
-      const cancellationOutcome = await recoverStreamFailure(
-        run,
-        attempt,
-        agent.agentId,
-        jobId,
-        store,
-        logEvent,
-        logSafely,
-        {
-          attempt: attemptCancellation,
-          attempted: () => cancellationAttempted,
-          recoveryRequested: () => cancellationRecoveryRequested,
-          requestRecovery: requestCancellationRecovery,
-          settle: () => settleCancellationAfterError(() => cancellationSettlement),
-          detail: () => cancellationRecoveryDetail,
-          fence: cancellationFence,
-          fenceKey: cancellationFenceKey,
-        },
-      );
+      const cancellationOutcome = await recoverCancellationError("Cursor stream failed", true);
       if (cancellationOutcome) return cancellationOutcome;
       throw error;
     }
@@ -408,7 +404,11 @@ export async function waitForOutcome(
         cancellationRecoveryDetail,
       );
     }
-    if (waitResult.kind === "error") throw waitResult.error;
+    if (waitResult.kind === "error") {
+      const cancellationOutcome = await recoverCancellationError("Cursor wait failed", false);
+      if (cancellationOutcome) return cancellationOutcome;
+      throw waitResult.error;
+    }
     clearCancellationObservation();
     const result = waitResult.result;
     return finalizeRunOutcome(

@@ -451,6 +451,47 @@ describe("Cursor run event delivery", () => {
     expect(runCancel).toHaveBeenCalledTimes(1);
   });
 
+  it("settles an in-flight cancellation before handling a wait transport error", async () => {
+    const runCancel = vi.fn(() => new Promise<void>((resolve) => {
+      setTimeout(resolve, 150);
+    }));
+    const run = {
+      id: "wait-error-cancel-run",
+      agentId: "agent",
+      status: "running" as const,
+      supports: (): boolean => true,
+      async *stream(): AsyncGenerator<never, void> {
+        yield* [] as never[];
+      },
+      wait: vi.fn(async () => {
+        throw new Error("transient wait error");
+      }),
+      cancel: runCancel,
+    } as unknown as Run;
+    const attempt = { ...publishingAttempt(), status: "IMPLEMENTING" as const };
+    const store = {
+      isCancellationRequested: (): boolean => true,
+      beginRunEvent: (): RunEventDeliveryState => "LOGGED",
+      completeRunEvent: (): void => undefined,
+      listPendingRunEvents: (): PendingRunEvent[] => [],
+    };
+
+    const outcome = await waitForOutcome(
+      run,
+      { agentId: "agent" } as SDKAgent,
+      attempt,
+      "job",
+      store,
+      () => undefined,
+      async () => undefined,
+      async () => undefined,
+    );
+
+    expect(outcome.status).toBe("blocked");
+    expect(outcome.reason).toMatch(/RECOVERY_REQUIRED/);
+    expect(runCancel).toHaveBeenCalledTimes(1);
+  });
+
   it("prioritizes pending delivery uncertainty when stream decoding fails", async () => {
     let pending: PendingRunEvent | undefined;
     let firstLog = true;
