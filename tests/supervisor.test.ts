@@ -11,6 +11,12 @@ import {
   supervisorBackoffMs,
 } from "../src/supervisor.js";
 
+// Under full-file parallelism, worker startup can be CPU-starved for several
+// seconds. Keep the shutdown contract strict below; this watchdog only covers
+// child readiness and teardown scheduling under that measured contention.
+const childLifecycleTimeoutMs = 10_000;
+const shutdownTestTimeoutMs = 30_000;
+
 const stores: JobStore[] = [];
 
 afterEach(() => {
@@ -93,12 +99,22 @@ async function runPendingClaimShutdownChild(
   const startedAt = Date.now();
   return new Promise((resolve, reject) => {
     let signalled = false;
+    let settled = false;
     let root = "";
     let signalSentAt: number | undefined;
     const timeout = setTimeout(() => {
+      settled = true;
       child.kill("SIGKILL");
-      reject(new Error(`shutdown child timed out for ${signal}; stderr=${stderr}`));
-    }, 2_000);
+      void new Promise<void>((finish) => {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          finish();
+          return;
+        }
+        child.once("exit", () => finish());
+      }).finally(() => {
+        reject(new Error(`shutdown child timed out for ${signal}; stderr=${stderr}`));
+      });
+    }, childLifecycleTimeoutMs);
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
       if (!signalled && stdout.includes("READY ")) {
@@ -110,10 +126,14 @@ async function runPendingClaimShutdownChild(
     });
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
     child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
       reject(error);
     });
     child.once("exit", (code, childSignal) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
       const finishedAt = Date.now();
       resolve({
@@ -147,7 +167,7 @@ describe("durable supervisor recovery", () => {
       expect(reclaimed?.resumed).toBe(true);
       expect(reclaimed?.attempt.status).toBe("PREPARING");
     }
-  });
+  }, shutdownTestTimeoutMs);
 
   it("keeps a pending claim alive long enough for a referenced heartbeat to advance the lease", async () => {
     const script = `
@@ -196,12 +216,29 @@ describe("durable supervisor recovery", () => {
     child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
     const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      let settled = false;
       const timeout = setTimeout(() => {
+        settled = true;
         child.kill("SIGKILL");
-        reject(new Error(`child heartbeat proof timed out: ${stderr}`));
-      }, 3_000);
-      child.once("error", reject);
+        void new Promise<void>((finish) => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            finish();
+            return;
+          }
+          child.once("exit", () => finish());
+        }).finally(() => {
+          reject(new Error(`child heartbeat proof timed out: ${stderr}`));
+        });
+      }, childLifecycleTimeoutMs);
+      child.once("error", (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(error);
+      });
       child.once("exit", (code, signal) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
         resolve({ code, signal });
       });
@@ -210,7 +247,7 @@ describe("durable supervisor recovery", () => {
     const payload = JSON.parse(stdout.trim()) as { before: string; after?: string };
     expect(payload.after).toBeDefined();
     expect(payload.after).not.toBe(payload.before);
-  });
+  }, shutdownTestTimeoutMs);
 
   it("reclaims one expired active claim while a primary workflow is still running", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "cursor-supervisor-reclaim-"));
