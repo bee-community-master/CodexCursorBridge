@@ -16,8 +16,7 @@ import { emptyMachineConfig, loadMachineConfig, runtimePaths, saveMachineConfig 
 import { runFile } from "./git.js";
 import {
   deleteCursorApiKey,
-  readCursorApiKey,
-  storeCursorApiKey,
+  ensureCursorApiKey,
 } from "./keychain.js";
 import { installSupervisor, uninstallSupervisor } from "./launchd.js";
 import { removeManagedRegistrationBlocks, upsertManagedMcpBlock } from "./managed-config.js";
@@ -177,9 +176,7 @@ export async function loadBootstrapConfig(
 export async function bootstrap(projectRoot: string): Promise<void> {
   if (process.platform !== "darwin") throw new Error("Cursor Bridge v1 supports macOS only");
   await runFile("pnpm", ["build"], { cwd: projectRoot, timeoutMs: 120_000 });
-  process.stdout.write("Enter the Cursor API key in the macOS Keychain prompt.\n");
-  await storeCursorApiKey();
-  const apiKey = await readCursorApiKey();
+  const apiKey = await ensureCursorApiKey();
   const cursorModel = await chooseGrok(apiKey);
 
   const paths = runtimePaths(projectRoot);

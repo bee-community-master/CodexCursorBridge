@@ -33,11 +33,14 @@ pnpm bootstrap
 `pnpm bootstrap`은 다음을 수행합니다.
 
 - Bridge 빌드
-- Cursor API key를 네이티브 macOS Keychain prompt로 저장(명령 인자·환경 변수로 전달하지 않음)
+- 기존 macOS Keychain 항목에 비어 있지 않은 Cursor API key가 있으면 그대로 재사용(저장 명령을 호출하지 않음)
+- 항목이 없거나 비어 있을 때만 보이는 터미널의 네이티브 Keychain prompt로 새 key 저장(명령 인자·환경 변수·로그로 전달하지 않음)
 - 계정에서 실제 사용 가능한 Grok 모델 선택 및 `effort=high`, `fast=false` variant 명시적 고정
 - repo-local `cursor-bridge` Codex plugin 설치
 - `~/.codex/config.toml`에 네 개의 좁은 MCP 도구 등록
 - `com.codex-cursor-bridge.supervisor` launchd service 설치
+
+Bootstrap은 유효한 Keychain 항목을 `-U`로 갱신하지 않습니다. 여러 bootstrap이 동시에 실행되면 `$CURSOR_BRIDGE_HOME/.bootstrap-keychain.sqlite`(기본값 `~/.config/codex-cursor-bridge/.bootstrap-keychain.sqlite`)의 `BEGIN IMMEDIATE` transaction이 inspect부터 prompt/store와 검증까지 직렬화됩니다. 실제 interactive `security` child는 owner-only 보조 SQLite guard와 PID·UID·시작시각·명령행 identity marker가 종료될 때까지 함께 유지되므로, bootstrap 부모가 crash해도 child가 끝나거나 종료된 것을 확인하기 전에는 두 번째 prompt/store가 시작되지 않습니다. lock database와 guard에는 비밀을 쓰지 않고 파일은 owner-only로 보호합니다. 입력이 취소되거나 저장에 실패하면 새 key를 확인할 때까지 중단하고 Codex 설정, plugin, launchd 등록을 변경하지 않으므로, prompt가 보이는 macOS Terminal에서 다시 실행하세요. 기존 key를 교체하려면 먼저 명시적인 운영 절차로 Keychain 항목을 회전한 뒤 bootstrap을 재실행해야 합니다.
 
 모델 ID와 검증된 variant params(`effort=high`, `fast=false`)·저장소 경로는 `~/.config/codex-cursor-bridge/config.json`, Job DB·로그·보고서·attestation·생성 worktree는 같은 디렉터리 아래에 저장됩니다. 기존 model-ID-only 설정도 계속 읽을 수 있으며, 실행 시 라이브 모델 목록에서 high-effort non-fast variant로 승격됩니다. `pnpm bootstrap`을 다시 실행하면 해당 params가 설정에 명시적으로 저장됩니다. Cursor SDK 재개 상태도 같은 디렉터리 아래에 저장되며 저장소에는 커밋되지 않습니다.
 
