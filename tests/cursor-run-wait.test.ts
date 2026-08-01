@@ -278,6 +278,40 @@ describe("Cursor run event delivery", () => {
     expect(runCancel).toHaveBeenCalledTimes(1);
   });
 
+  it("starts a requested supported cancellation before an immediate terminal result", async () => {
+    const runCancel = vi.fn(async () => undefined);
+    const run = {
+      id: "immediate-cancel-run",
+      agentId: "agent",
+      status: "running" as const,
+      supports: (): boolean => true,
+      async *stream(): AsyncGenerator<never, void> { /* no events */ },
+      wait: async () => ({ status: "finished" as const, result: "done" }),
+      cancel: runCancel,
+    } as unknown as Run;
+    const attempt = { ...publishingAttempt(), status: "IMPLEMENTING" as const };
+    const store = {
+      isCancellationRequested: (): boolean => true,
+      beginRunEvent: (): RunEventDeliveryState => "LOGGED",
+      completeRunEvent: (): void => undefined,
+      listPendingRunEvents: (): PendingRunEvent[] => [],
+    };
+
+    const outcome = await waitForOutcome(
+      run,
+      { agentId: "agent" } as SDKAgent,
+      attempt,
+      "job",
+      store,
+      () => undefined,
+      async () => undefined,
+      async () => undefined,
+    );
+
+    expect(outcome.status).toBe("needs_input");
+    expect(runCancel).toHaveBeenCalledTimes(1);
+  });
+
   it("fences a successful cancel when no terminal stream result arrives", async () => {
     const runCancel = vi.fn(async () => undefined);
     const runWait = vi.fn();
@@ -335,7 +369,7 @@ describe("Cursor run event delivery", () => {
     const store = {
       isCancellationRequested: (): boolean => {
         cancellationChecks += 1;
-        return cancellationChecks > 2;
+        return cancellationChecks > 4;
       },
       beginRunEvent: (): RunEventDeliveryState => "LOGGED",
       completeRunEvent: (): void => undefined,
