@@ -116,6 +116,12 @@ describe("job state", () => {
       "worker-1",
       "PREPARING",
     ).workerToken).toBe("worker-1");
+    expect(first.claimNext(
+      "worker-1",
+      60_000,
+      new Date("2026-07-23T00:00:02.000Z"),
+      "worker-1",
+    )).toBeUndefined();
     const reclaimed = second.claimNext("worker-2", 60_000, new Date("2026-07-23T00:00:02.000Z"));
     expect(reclaimed?.attempt.id).toBe(original?.attempt.id);
     expect(reclaimed?.attempt.workerToken).toBe("worker-2");
@@ -135,6 +141,53 @@ describe("job state", () => {
     expect(() => second.updateAttempt("missing", "worker-2", {}))
       .toThrow(/unknown attempt/i);
     expect(second.listAttempts(original!.job.id)).toHaveLength(1);
+  });
+
+  it("claims only expired active work when the supervisor runs a recovery sweep", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "cursor-state-"));
+    const databaseFile = path.join(dir, "jobs.sqlite");
+    const store = new JobStore(databaseFile);
+    stores.push(store);
+    const staleJob = store.createOrGet({
+      repositoryAlias: "demo", taskId: "TASK-STALE", specVersion: 1, specHash: "sha256:stale",
+      taskCommitSha: "a".repeat(40), taskBlobSha: "b".repeat(40),
+      targetOrigin: "owner/demo", targetBaseSha: "c".repeat(40),
+      policyVersion: 2, maxAttempts: 2,
+    });
+    const stale = store.claimNext(
+      "dead-worker",
+      1_000,
+      new Date("2026-07-23T00:00:00.000Z"),
+    )!;
+    const queuedJob = store.createOrGet({
+      repositoryAlias: "demo", taskId: "TASK-QUEUED", specVersion: 1, specHash: "sha256:queued",
+      taskCommitSha: "d".repeat(40), taskBlobSha: "e".repeat(40),
+      targetOrigin: "owner/demo", targetBaseSha: "f".repeat(40),
+      policyVersion: 2, maxAttempts: 2,
+    });
+
+    expect(store.claimExpired(
+      "dead-worker",
+      60_000,
+      new Date("2026-07-23T00:00:02.000Z"),
+    )).toBeUndefined();
+
+    const recovered = store.claimExpired(
+      "replacement-worker",
+      60_000,
+      new Date("2026-07-23T00:00:02.000Z"),
+    );
+
+    expect(recovered?.job.id).toBe(staleJob.id);
+    expect(recovered?.attempt.id).toBe(stale.attempt.id);
+    expect(recovered?.attempt.workerToken).toBe("replacement-worker");
+    expect(store.get(queuedJob.id)?.status).toBe("QUEUED");
+    expect(() => store.assertActiveAttempt(
+      staleJob.id,
+      stale.attempt.id,
+      "dead-worker",
+      "PREPARING",
+    )).toThrow(/lease/i);
   });
 
   it("marks a stale-spec claim and its active attempt terminal in one transaction", async () => {

@@ -7,11 +7,9 @@ import type {
   RunEventDeliveryState,
   WorkerStatePort,
 } from "./application/workflow-ports.js";
-import {
-  rowToAttempt,
-  rowToJob,
-} from "./adapters/sqlite-state-mappers.js";
+import { rowToAttempt } from "./adapters/sqlite-state-mappers.js";
 import { SqliteDeliveryLifecycle } from "./adapters/sqlite-delivery-lifecycle.js";
+import { SqliteClaimLifecycle } from "./adapters/sqlite-claim-lifecycle.js";
 import { SqliteJobRecords } from "./adapters/sqlite-job-records.js";
 import { SqliteStateLedger } from "./adapters/sqlite-state-ledger.js";
 import { migrateStateDatabase } from "./adapters/sqlite-state-schema.js";
@@ -54,6 +52,13 @@ export type {
 
 export { STATE_SCHEMA_VERSION } from "./adapters/sqlite-state-schema.js";
 
+const reportAttachAttemptStatuses: AttemptStatus[] = [
+  "PREPARING",
+  "IMPLEMENTING",
+  "VERIFYING",
+  "REPAIRING",
+  "PUBLISHING",
+];
 const reclaimableJobStatuses: JobStatus[] = [
   "PREPARING",
   "IMPLEMENTING",
@@ -61,13 +66,6 @@ const reclaimableJobStatuses: JobStatus[] = [
   "REPAIRING",
   "PUBLISHING",
   "CANCEL_REQUESTED",
-];
-const reportAttachAttemptStatuses: AttemptStatus[] = [
-  "PREPARING",
-  "IMPLEMENTING",
-  "VERIFYING",
-  "REPAIRING",
-  "PUBLISHING",
 ];
 
 function nowIso(now = new Date()): string {
@@ -80,6 +78,7 @@ function leaseIso(now: Date, leaseMs: number): string {
 
 export class JobStore implements WorkerStatePort {
   readonly #database: DatabaseSync;
+  readonly #claims: SqliteClaimLifecycle;
   readonly #ledger: SqliteStateLedger;
   readonly #records: SqliteJobRecords;
   readonly #delivery: SqliteDeliveryLifecycle;
@@ -90,6 +89,7 @@ export class JobStore implements WorkerStatePort {
     chmodSync(directory, 0o700);
     this.#database = new DatabaseSync(file);
     this.#ledger = new SqliteStateLedger(this.#database);
+    this.#claims = new SqliteClaimLifecycle(this.#database, this.#ledger);
     this.#records = new SqliteJobRecords(this.#database, this.#ledger);
     this.#delivery = new SqliteDeliveryLifecycle(
       this.#database,
@@ -179,74 +179,17 @@ export class JobStore implements WorkerStatePort {
     return rowToAttempt(row);
   }
 
-  claimNext(workerToken: string, leaseMs: number, now = new Date()): ClaimedWork | undefined {
-    const timestamp = nowIso(now);
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
-      const placeholders = reclaimableJobStatuses.map(() => "?").join(", ");
-      const row = this.#database.prepare(`
-        SELECT j.* FROM jobs j
-        LEFT JOIN attempts a ON a.id = j.current_attempt_id
-        WHERE j.status = 'QUEUED'
-          OR (j.status IN (${placeholders}) AND a.lease_expires_at <= ?)
-        ORDER BY j.created_at, j.id
-        LIMIT 1
-      `).get(...reclaimableJobStatuses, timestamp) as Record<string, unknown> | undefined;
-      if (!row) {
-        this.#database.exec("COMMIT");
-        return undefined;
-      }
-      let job = rowToJob(row);
-      let attempt: Attempt;
-      let resumed = false;
-      if (job.currentAttemptId) {
-        const existing = this.getAttempt(job.currentAttemptId);
-        if (!existing) throw new Error(`Current attempt is missing: ${job.currentAttemptId}`);
-        const lease = leaseIso(now, leaseMs);
-        this.#database.prepare(`
-          UPDATE attempts
-          SET worker_token = ?, lease_expires_at = ?, heartbeat_at = ?, updated_at = ?
-          WHERE id = ? AND lease_expires_at <= ?
-        `).run(workerToken, lease, timestamp, timestamp, existing.id, timestamp);
-        attempt = this.#requireAttempt(existing.id);
-        if (attempt.workerToken !== workerToken) {
-          throw new Error(`Expired attempt was reclaimed concurrently: ${existing.id}`);
-        }
-        resumed = true;
-        this.#ledger.recordEvent(
-          job.id,
-          attempt.id,
-          "ATTEMPT_RECLAIMED",
-          { ordinal: attempt.ordinal },
-          timestamp,
-        );
-      } else {
-        const ordinal = Number((this.#database.prepare(
-          "SELECT COALESCE(MAX(ordinal), 0) AS ordinal FROM attempts WHERE job_id = ?",
-        ).get(job.id) as Record<string, unknown>).ordinal) + 1;
-        if (ordinal > job.maxAttempts) throw new Error(`Attempt limit exceeded for job ${job.id}`);
-        const attemptId = randomUUID();
-        const lease = leaseIso(now, leaseMs);
-        this.#database.prepare(`
-          INSERT INTO attempts (
-            id, job_id, ordinal, status, worker_token, lease_expires_at,
-            heartbeat_at, created_at, updated_at
-          ) VALUES (?, ?, ?, 'PREPARING', ?, ?, ?, ?, ?)
-        `).run(attemptId, job.id, ordinal, workerToken, lease, timestamp, timestamp, timestamp);
-        this.#database.prepare(`
-          UPDATE jobs SET status = 'PREPARING', current_attempt_id = ?, updated_at = ?
-          WHERE id = ? AND status = 'QUEUED'
-        `).run(attemptId, timestamp, job.id);
-        attempt = this.#requireAttempt(attemptId);
-        job = this.#requireJob(job.id);
-        this.#ledger.recordEvent(job.id, attempt.id, "JOB_CLAIMED", { ordinal }, timestamp);
-      }
-      this.#database.exec("COMMIT");
-      return { job, attempt, resumed };
-    } catch (error) {
-      this.#database.exec("ROLLBACK");
-      throw error;
-    }
+  claimNext(
+    workerToken: string,
+    leaseMs: number,
+    now = new Date(),
+    protectedWorkerToken?: string,
+  ): ClaimedWork | undefined {
+    return this.#claims.claimNext(workerToken, leaseMs, now, protectedWorkerToken);
+  }
+
+  claimExpired(workerToken: string, leaseMs: number, now = new Date()): ClaimedWork | undefined {
+    return this.#claims.claimExpired(workerToken, leaseMs, now);
   }
 
   heartbeat(attemptId: string, workerToken: string, leaseMs: number, now = new Date()): Attempt {

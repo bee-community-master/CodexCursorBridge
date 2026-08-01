@@ -5,7 +5,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimePaths } from "../src/domain/configuration.js";
 import { JobStore } from "../src/state.js";
-import { runSupervisor, supervisorBackoffMs } from "../src/supervisor.js";
+import {
+  runSupervisor,
+  SupervisorShutdownError,
+  supervisorBackoffMs,
+} from "../src/supervisor.js";
 
 const stores: JobStore[] = [];
 
@@ -206,6 +210,235 @@ describe("durable supervisor recovery", () => {
     const payload = JSON.parse(stdout.trim()) as { before: string; after?: string };
     expect(payload.after).toBeDefined();
     expect(payload.after).not.toBe(payload.before);
+  });
+
+  it("reclaims one expired active claim while a primary workflow is still running", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cursor-supervisor-reclaim-"));
+    const store = new JobStore(path.join(root, "jobs.sqlite"));
+    stores.push(store);
+    const primaryJob = store.createOrGet({
+      repositoryAlias: "demo", taskId: "TASK-748", specVersion: 1, specHash: "sha256:primary",
+      taskCommitSha: "a".repeat(40), taskBlobSha: "b".repeat(40),
+      targetOrigin: "owner/demo", targetBaseSha: "c".repeat(40),
+      policyVersion: 2, maxAttempts: 2,
+    });
+    let staleJobId: string | undefined;
+    let staleAttemptId: string | undefined;
+    let stopping = false;
+    let recovered!: () => void;
+    const recoveredPromise = new Promise<void>((resolve) => {
+      recovered = resolve;
+    });
+    const processClaims: string[] = [];
+
+    await runSupervisor(store, runtimePaths(root), {
+      workerToken: "supervisor-test",
+      claimLeaseMs: 60,
+      heartbeatIntervalMs: 10,
+      reclaimIntervalMs: 5,
+      shouldStop: () => stopping,
+      processClaim: async (_state, claim) => {
+        processClaims.push(claim.job.id);
+        if (claim.job.id === primaryJob.id) {
+          const staleJob = store.createOrGet({
+            repositoryAlias: "demo", taskId: "TASK-718", specVersion: 1, specHash: "sha256:stale",
+            taskCommitSha: "d".repeat(40), taskBlobSha: "e".repeat(40),
+            targetOrigin: "owner/demo", targetBaseSha: "f".repeat(40),
+            policyVersion: 2, maxAttempts: 2,
+          });
+          staleJobId = staleJob.id;
+          const staleClaim = store.claimNext(
+            "dead-worker",
+            10,
+            new Date(Date.now() - 1_000),
+          )!;
+          staleAttemptId = staleClaim.attempt.id;
+          const queuedJob = store.createOrGet({
+            repositoryAlias: "demo", taskId: "TASK-QUEUED", specVersion: 1, specHash: "sha256:queued",
+            taskCommitSha: "1".repeat(40), taskBlobSha: "2".repeat(40),
+            targetOrigin: "owner/demo", targetBaseSha: "3".repeat(40),
+            policyVersion: 2, maxAttempts: 2,
+          });
+
+          await recoveredPromise;
+          expect(store.get(queuedJob.id)?.status).toBe("QUEUED");
+          return;
+        }
+
+        expect(claim.job.id).toBe(staleJobId);
+        expect(claim.attempt.id).toBe(staleAttemptId);
+        expect(claim.attempt.workerToken).toBe("supervisor-test");
+        stopping = true;
+        recovered();
+      },
+    });
+
+    expect(processClaims).toEqual([primaryJob.id, staleJobId]);
+    expect(staleJobId).toBeDefined();
+    expect(staleAttemptId).toBeDefined();
+    expect(store.get(staleJobId!)?.status).toBe("PREPARING");
+    expect(store.getAttempt(staleAttemptId!)?.workerToken).toBe("supervisor-test");
+    expect(() => store.transitionAttempt(
+      staleAttemptId!,
+      "dead-worker",
+      ["PREPARING"],
+      "IMPLEMENTING",
+    )).toThrow(/changed concurrently|lease/i);
+  });
+
+  it("does not reclaim a still-running recovery from the foreground loop", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cursor-supervisor-reclaim-duplicate-"));
+    const store = new JobStore(path.join(root, "jobs.sqlite"));
+    stores.push(store);
+    const primaryJob = store.createOrGet({
+      repositoryAlias: "demo", taskId: "TASK-PRIMARY-TERMINAL", specVersion: 1, specHash: "sha256:primary-terminal",
+      taskCommitSha: "a".repeat(40), taskBlobSha: "b".repeat(40),
+      targetOrigin: "owner/demo", targetBaseSha: "c".repeat(40),
+      policyVersion: 2, maxAttempts: 2,
+    });
+    let recoveryJobId: string | undefined;
+    let recoveryAttemptId: string | undefined;
+    let queuedJobId: string | undefined;
+    let stopping = false;
+    let recoveryStarted!: () => void;
+    const recoveryStartedPromise = new Promise<void>((resolve) => {
+      recoveryStarted = resolve;
+    });
+    let releaseRecovery!: () => void;
+    const recoveryReleasePromise = new Promise<void>((resolve) => {
+      releaseRecovery = resolve;
+    });
+    const processClaims: string[] = [];
+    const recoveryEffects: string[] = [];
+
+    await runSupervisor(store, runtimePaths(root), {
+      workerToken: "supervisor-duplicate-test",
+      claimLeaseMs: 30,
+      heartbeatIntervalMs: 100,
+      reclaimIntervalMs: 5,
+      idlePollMs: 5,
+      shouldStop: () => stopping,
+      processClaim: async (_state, claim) => {
+        processClaims.push(claim.job.id);
+        if (claim.job.id === primaryJob.id) {
+          const recoveryJob = store.createOrGet({
+            repositoryAlias: "demo", taskId: "TASK-RECOVERY-PENDING", specVersion: 1, specHash: "sha256:recovery-pending",
+            taskCommitSha: "d".repeat(40), taskBlobSha: "e".repeat(40),
+            targetOrigin: "owner/demo", targetBaseSha: "f".repeat(40),
+            policyVersion: 2, maxAttempts: 2,
+          });
+          recoveryJobId = recoveryJob.id;
+          const staleClaim = store.claimNext(
+            "dead-worker",
+            10,
+            new Date(Date.now() - 1_000),
+          )!;
+          recoveryAttemptId = staleClaim.attempt.id;
+          const queuedJob = store.createOrGet({
+            repositoryAlias: "demo", taskId: "TASK-QUEUED-AFTER-RECOVERY", specVersion: 1, specHash: "sha256:queued-after-recovery",
+            taskCommitSha: "1".repeat(40), taskBlobSha: "2".repeat(40),
+            targetOrigin: "owner/demo", targetBaseSha: "3".repeat(40),
+            policyVersion: 2, maxAttempts: 2,
+          });
+          queuedJobId = queuedJob.id;
+
+          await recoveryStartedPromise;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          store.transitionAttempt(
+            claim.attempt.id,
+            claim.attempt.workerToken,
+            ["PREPARING"],
+            "FAILED",
+            { errorMessage: "primary terminal" },
+          );
+          return;
+        }
+
+        if (claim.job.id === recoveryJobId) {
+          recoveryEffects.push("recovery-effect");
+          store.recordEvent(claim.job.id, claim.attempt.id, "RECOVERY_EFFECT", {});
+          if (recoveryEffects.length === 1) {
+            recoveryStarted();
+            await recoveryReleasePromise;
+          } else {
+            stopping = true;
+            releaseRecovery();
+          }
+          return;
+        }
+
+        expect(claim.job.id).toBe(queuedJobId);
+        store.transitionAttempt(
+          claim.attempt.id,
+          claim.attempt.workerToken,
+          ["PREPARING"],
+          "FAILED",
+          { errorMessage: "queued terminal" },
+        );
+        stopping = true;
+        releaseRecovery();
+      },
+    });
+
+    expect(processClaims).toEqual([primaryJob.id, recoveryJobId, queuedJobId]);
+    expect(recoveryEffects).toHaveLength(1);
+    expect(store.listEvents(recoveryJobId!).filter((event) => event.type === "ATTEMPT_RECLAIMED"))
+      .toHaveLength(1);
+    expect(store.listEvents(recoveryJobId!).filter((event) => event.type === "RECOVERY_EFFECT"))
+      .toHaveLength(1);
+    expect(store.getAttempt(recoveryAttemptId!)?.workerToken).toBe("supervisor-duplicate-test");
+  });
+
+  it("stops detached recovery heartbeats before forced shutdown", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cursor-supervisor-reclaim-shutdown-"));
+    const store = new JobStore(path.join(root, "jobs.sqlite"));
+    stores.push(store);
+    const primaryJob = store.createOrGet({
+      repositoryAlias: "demo", taskId: "TASK-PRIMARY", specVersion: 1, specHash: "sha256:primary-shutdown",
+      taskCommitSha: "a".repeat(40), taskBlobSha: "b".repeat(40),
+      targetOrigin: "owner/demo", targetBaseSha: "c".repeat(40),
+      policyVersion: 2, maxAttempts: 2,
+    });
+    let staleAttemptId: string | undefined;
+    let stopping = false;
+    let detachedStarted!: () => void;
+    const detachedStartedPromise = new Promise<void>((resolve) => {
+      detachedStarted = resolve;
+    });
+
+    const startedAt = Date.now();
+    await expect(runSupervisor(store, runtimePaths(root), {
+      workerToken: "supervisor-shutdown-test",
+      claimLeaseMs: 60,
+      heartbeatIntervalMs: 10,
+      reclaimIntervalMs: 5,
+      shouldStop: () => stopping,
+      processClaim: async (_state, claim) => {
+        if (claim.job.id === primaryJob.id) {
+          const staleJob = store.createOrGet({
+            repositoryAlias: "demo", taskId: "TASK-STALE-SHUTDOWN", specVersion: 1, specHash: "sha256:stale-shutdown",
+            taskCommitSha: "d".repeat(40), taskBlobSha: "e".repeat(40),
+            targetOrigin: "owner/demo", targetBaseSha: "f".repeat(40),
+            policyVersion: 2, maxAttempts: 2,
+          });
+          const staleClaim = store.claimNext(
+            "dead-worker",
+            10,
+            new Date(Date.now() - 1_000),
+          )!;
+          expect(staleClaim.job.id).toBe(staleJob.id);
+          staleAttemptId = staleClaim.attempt.id;
+          await new Promise<void>(() => undefined);
+        }
+        detachedStarted();
+        stopping = true;
+        await new Promise<void>(() => undefined);
+      },
+    })).rejects.toBeInstanceOf(SupervisorShutdownError);
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    await detachedStartedPromise;
+    expect(staleAttemptId).toBeDefined();
+    expect(store.getAttempt(staleAttemptId!)?.workerToken).toBe("supervisor-shutdown-test");
   });
 
   it("uses a bounded exponential backoff for repeated runtime failures", () => {
