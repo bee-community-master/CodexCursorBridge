@@ -392,6 +392,65 @@ describe("Cursor run event delivery", () => {
     expect(runWait).toHaveBeenCalledTimes(1);
   });
 
+  it("fences a cancellation attempt across a stream-error monitor retry", async () => {
+    const runCancel = vi.fn(() => new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error("stream-error cancellation reset")), 150);
+    }));
+    const run = {
+      id: "stream-error-cancel-run",
+      agentId: "agent",
+      status: "running" as const,
+      supports: (): boolean => true,
+      async *stream(): AsyncGenerator<never, void> {
+        yield* [] as never[];
+        throw new Error("transient stream error");
+      },
+      wait: vi.fn(),
+      cancel: runCancel,
+    } as unknown as Run;
+    const retryRun = {
+      ...run,
+      async *stream(): AsyncGenerator<never, void> {
+        yield await new Promise<never>(() => undefined);
+      },
+    } as unknown as Run;
+    const attempt = { ...publishingAttempt(), status: "IMPLEMENTING" as const };
+    const store = {
+      isCancellationRequested: (): boolean => true,
+      beginRunEvent: (): RunEventDeliveryState => "LOGGED",
+      completeRunEvent: (): void => undefined,
+      listPendingRunEvents: (): PendingRunEvent[] => [],
+    };
+    const fence = new Set<string>();
+
+    const firstOutcome = await waitForOutcome(
+      run,
+      { agentId: "agent" } as SDKAgent,
+      attempt,
+      "job",
+      store,
+      () => undefined,
+      async () => undefined,
+      async () => undefined,
+      fence,
+    );
+    const secondOutcome = await waitForOutcome(
+      retryRun,
+      { agentId: "agent" } as SDKAgent,
+      attempt,
+      "job",
+      store,
+      () => undefined,
+      async () => undefined,
+      async () => undefined,
+      fence,
+    );
+
+    expect(firstOutcome.status).toBe("blocked");
+    expect(secondOutcome.status).toBe("blocked");
+    expect(runCancel).toHaveBeenCalledTimes(1);
+  });
+
   it("prioritizes pending delivery uncertainty when stream decoding fails", async () => {
     let pending: PendingRunEvent | undefined;
     let firstLog = true;

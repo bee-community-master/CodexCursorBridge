@@ -88,6 +88,113 @@ async function waitForRunResult(
   return waitResult;
 }
 
+async function settleCancellationAfterError(
+  getCancellationSettlement: () => Promise<void> | undefined,
+): Promise<void> {
+  const cancellationSettlement = getCancellationSettlement();
+  if (cancellationSettlement) await Promise.race([cancellationSettlement, delay(cancellationObservationMs)]);
+}
+
+interface StreamFailureCancellation {
+  attempt: () => void;
+  attempted: () => boolean;
+  recoveryRequested: () => boolean;
+  requestRecovery: (detail: string) => void;
+  settle: () => Promise<void>;
+  detail: () => string | undefined;
+  fence: Set<string> | undefined;
+  fenceKey: string;
+}
+
+async function recoverStreamFailure(
+  run: Run,
+  attempt: Attempt,
+  agentId: string,
+  jobId: string,
+  store: CursorRunWaitState,
+  logEvent: (eventKey: string, message: string) => Promise<void>,
+  logSafely: (message: string) => Promise<void>,
+  cancellation: StreamFailureCancellation,
+): Promise<ImplementerOutcome | undefined> {
+  cancellation.attempt();
+  if (
+    !cancellation.attempted()
+    && !cancellation.recoveryRequested()
+    && !cancellation.fence?.has(cancellation.fenceKey)
+  ) {
+    if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
+      throw new CursorRunEventDeliveryUncertainError(run.id);
+    }
+    return undefined;
+  }
+  if (!cancellation.recoveryRequested()) {
+    cancellation.requestRecovery(
+      `CURSOR_TRANSPORT_UNCERTAIN: Cursor stream failed after cancellation was requested for run ${run.id}; RECOVERY_REQUIRED: no further cancel mutation was attempted.`,
+    );
+  }
+  await cancellation.settle();
+  return cancellationOutcomeAfterDrain(
+    run,
+    attempt,
+    agentId,
+    jobId,
+    store,
+    logEvent,
+    logSafely,
+    cancellation.detail(),
+  );
+}
+
+function finalizeRunOutcome(
+  run: Run,
+  agent: SDKAgent,
+  attempt: Attempt,
+  jobId: string,
+  store: CursorRunWaitState,
+  submitted: () => SubmittedOutcome | undefined,
+  result: RunWaitResult,
+  cancellationSupported: boolean,
+  cancellationDetail: string | undefined,
+): ImplementerOutcome {
+  if (store.isCancellationRequested(jobId) && !cancellationSupported) {
+    return cancellationRecoveryOutcome(run, attempt, agent.agentId, cancellationDetail);
+  }
+  if (result.status === "cancelled" && store.isCancellationRequested(jobId)) {
+    return {
+      status: "blocked",
+      agentId: agent.agentId,
+      runId: run.id,
+      ...(result.requestId ? { requestId: result.requestId } : {}),
+      summary: "Cancelled by user request.",
+      reason: "Cancellation was requested by the bridge.",
+      ...(result.usage ? {
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+      } : {}),
+    };
+  }
+  if (result.status !== "finished") {
+    throw new Error(result.error?.message ?? `Cursor run ended with ${result.status}`);
+  }
+  const structured = submitted() ?? {
+    status: "needs_input" as const,
+    summary: redactSensitiveText(result.result ?? "Cursor did not submit a structured outcome."),
+    reason: "Cursor completed without calling submit_bridge_outcome.",
+  };
+  return {
+    status: structured.status,
+    agentId: agent.agentId,
+    runId: run.id,
+    ...(result.requestId ? { requestId: result.requestId } : {}),
+    summary: redactSensitiveText(structured.summary),
+    ...(structured.reason ? { reason: redactSensitiveText(structured.reason) } : {}),
+    ...(result.usage ? {
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+    } : {}),
+  };
+}
+
 async function consumeRunStream(
   run: Run,
   jobId: string,
@@ -150,6 +257,7 @@ export async function waitForOutcome(
   submitted: () => SubmittedOutcome | undefined,
   logSafely: (message: string) => Promise<void>,
   logEvent: (eventKey: string, message: string) => Promise<void>,
+  cancellationFence?: Set<string>,
 ): Promise<ImplementerOutcome> {
   if (!supportsRunOperation(run, "wait")) {
     return detachedRunOutcome(run, attempt, agent.agentId, "wait");
@@ -173,6 +281,7 @@ export async function waitForOutcome(
     resolveCancellationRecovery = resolve;
   });
   const cancellationSupported = supportsRunOperation(run, "cancel");
+  const cancellationFenceKey = attempt.id;
   const clearCancellationObservation = (): void => {
     if (!cancellationObservationTimer) return;
     clearTimeout(cancellationObservationTimer);
@@ -196,6 +305,13 @@ export async function waitForOutcome(
       || !store.isCancellationRequested(jobId)
     ) return;
     cancellationCheckActive = true;
+    if (cancellationFence?.has(cancellationFenceKey)) {
+      requestCancellationRecovery(
+        `CURSOR_TRANSPORT_UNCERTAIN: cancellation was already attempted for attempt ${attempt.id}; RECOVERY_REQUIRED: no second cancel mutation was attempted.`,
+      );
+      cancellationCheckActive = false;
+      return;
+    }
     if (!cancellationSupported) {
       requestCancellationRecovery(
         `RECOVERY_REQUIRED: Cursor cancellation is unavailable for run ${run.id}; no cancel mutation was attempted.`,
@@ -204,6 +320,7 @@ export async function waitForOutcome(
       return;
     }
     cancellationAttempted = true;
+    cancellationFence?.add(cancellationFenceKey);
     resolveCancellationAttempt();
     cancellationObservationTimer = setTimeout(() => requestCancellationRecovery(
       `CURSOR_TRANSPORT_UNCERTAIN: Cursor cancellation for run ${run.id} did not produce an authoritative terminal result within ${cancellationObservationMs}ms; RECOVERY_REQUIRED: no further cancel mutation was attempted.`,
@@ -247,9 +364,26 @@ export async function waitForOutcome(
         );
       }
     } catch (error) {
-      if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
-        throw new CursorRunEventDeliveryUncertainError(run.id);
-      }
+      const cancellationOutcome = await recoverStreamFailure(
+        run,
+        attempt,
+        agent.agentId,
+        jobId,
+        store,
+        logEvent,
+        logSafely,
+        {
+          attempt: attemptCancellation,
+          attempted: () => cancellationAttempted,
+          recoveryRequested: () => cancellationRecoveryRequested,
+          requestRecovery: requestCancellationRecovery,
+          settle: () => settleCancellationAfterError(() => cancellationSettlement),
+          detail: () => cancellationRecoveryDetail,
+          fence: cancellationFence,
+          fenceKey: cancellationFenceKey,
+        },
+      );
+      if (cancellationOutcome) return cancellationOutcome;
       throw error;
     }
     if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
@@ -277,41 +411,17 @@ export async function waitForOutcome(
     if (waitResult.kind === "error") throw waitResult.error;
     clearCancellationObservation();
     const result = waitResult.result;
-    if (store.isCancellationRequested(jobId) && !cancellationSupported) return cancellationRecoveryOutcome(run, attempt, agent.agentId, cancellationRecoveryDetail);
-    if (result.status === "cancelled" && store.isCancellationRequested(jobId)) {
-      return {
-        status: "blocked",
-        agentId: agent.agentId,
-        runId: run.id,
-        ...(result.requestId ? { requestId: result.requestId } : {}),
-        summary: "Cancelled by user request.",
-        reason: "Cancellation was requested by the bridge.",
-        ...(result.usage ? {
-          inputTokens: result.usage.inputTokens,
-          outputTokens: result.usage.outputTokens,
-        } : {}),
-      };
-    }
-    if (result.status !== "finished") {
-      throw new Error(result.error?.message ?? `Cursor run ended with ${result.status}`);
-    }
-    const structured = submitted() ?? {
-      status: "needs_input" as const,
-      summary: redactSensitiveText(result.result ?? "Cursor did not submit a structured outcome."),
-      reason: "Cursor completed without calling submit_bridge_outcome.",
-    };
-    return {
-      status: structured.status,
-      agentId: agent.agentId,
-      runId: run.id,
-      ...(result.requestId ? { requestId: result.requestId } : {}),
-      summary: redactSensitiveText(structured.summary),
-      ...(structured.reason ? { reason: redactSensitiveText(structured.reason) } : {}),
-      ...(result.usage ? {
-        inputTokens: result.usage.inputTokens,
-        outputTokens: result.usage.outputTokens,
-      } : {}),
-    };
+    return finalizeRunOutcome(
+      run,
+      agent,
+      attempt,
+      jobId,
+      store,
+      submitted,
+      result,
+      cancellationSupported,
+      cancellationRecoveryDetail,
+    );
   } finally {
     clearInterval(cancellationTimer);
     clearCancellationObservation();

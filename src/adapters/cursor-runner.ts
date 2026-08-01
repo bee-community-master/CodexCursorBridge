@@ -486,7 +486,6 @@ export class CursorImplementer {
       throw new Error(`Could not reconcile local Cursor runs: ${detail}`);
     }
   }
-
   async #bindRun(attempt: Attempt, agentId: string, run: Run): Promise<void> {
     this.#store.updateAttempt(attempt.id, attempt.workerToken, {
       cursorAgentId: agentId,
@@ -546,7 +545,6 @@ export class CursorImplementer {
       `Cursor send remained ambiguous after ${CURSOR_TRANSPORT_MAX_ATTEMPTS} attempts: ${transportFailureSummary(lastError)}`,
     );
   }
-
   async #waitForOutcomeWithTransportRetry(
     run: Run,
     agent: SDKAgent,
@@ -555,6 +553,7 @@ export class CursorImplementer {
     submitted: () => z.infer<typeof outcomeSchema> | undefined,
   ): Promise<ImplementerOutcome> {
     let current = run;
+    const cancellationFence = new Set<string>();
     for (let retry = 1; retry <= CURSOR_TRANSPORT_MAX_ATTEMPTS; retry += 1) {
       try {
         if (current.status === "running" && !supportsRunOperation(current, "wait")) return detachedRunOutcome(current, attempt, agent.agentId, "wait");
@@ -568,6 +567,7 @@ export class CursorImplementer {
           submitted,
           this.#logSafely.bind(this),
           this.#logEvent.bind(this),
+          cancellationFence,
         );
       } catch (error) {
         if (error instanceof CursorRunEventDeliveryUncertainError) throw error;
