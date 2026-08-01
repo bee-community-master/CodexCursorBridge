@@ -452,8 +452,8 @@ describe("Cursor run event delivery", () => {
   });
 
   it("settles an in-flight cancellation before handling a wait transport error", async () => {
-    const runCancel = vi.fn(() => new Promise<void>((resolve) => {
-      setTimeout(resolve, 150);
+    const runCancel = vi.fn(() => new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error("wait-error cancellation reset")), 150);
     }));
     const run = {
       id: "wait-error-cancel-run",
@@ -469,8 +469,9 @@ describe("Cursor run event delivery", () => {
       cancel: runCancel,
     } as unknown as Run;
     const attempt = { ...publishingAttempt(), status: "IMPLEMENTING" as const };
+    let cancellationChecks = 0;
     const store = {
-      isCancellationRequested: (): boolean => true,
+      isCancellationRequested: (): boolean => cancellationChecks++ >= 2,
       beginRunEvent: (): RunEventDeliveryState => "LOGGED",
       completeRunEvent: (): void => undefined,
       listPendingRunEvents: (): PendingRunEvent[] => [],
