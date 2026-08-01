@@ -83,10 +83,13 @@ MCP SDK, 프로세스 실행기 같은 outbound adapter를 import하지 않는�
   흡수하고 250ms부터 최대 30초까지 bounded exponential backoff를 적용한다. active
   claim heartbeat timer는 claim이 해결되기 전까지 process-referenced 상태로 유지해
   detached/replay 작업이 code 0 자연 종료로 사라지지 않게 하며, completion/error/finally
-  경로에서 정리한다. SIGTERM/SIGINT는 process claim과 bounded grace race를 거친 뒤
-  참조된 미해결 handle도 강제로 종료해 lease 만료/reclaim을 보장한다. 예외가
-  난 Attempt를 임의로 FAILED로 만들지 않으며, `supervisor.log`와 Job log에 전송
-  진단을 남긴 뒤 replacement supervisor가 durable lease를 reclaim할 수 있게 한다.
+  경로에서 정리한다. active workflow가 긴 SDK 호출에 머무는 동안에도 별도의 bounded
+  recovery watchdog가 `claimExpired`로 만료된 active claim만 한 번 회수·fence하고,
+  queued 작업을 가져오거나 동일 회수 작업을 병렬로 중복 실행하지 않는다. SIGTERM/SIGINT는
+  process claim과 bounded grace race를 거친 뒤 참조된 미해결 handle도 강제로 종료해
+  lease 만료/reclaim을 보장한다. 예외가 난 Attempt를 임의로 FAILED로 만들지 않으며,
+  `supervisor.log`와 Job log에 전송 진단을 남긴 뒤 replacement supervisor가 durable
+  lease를 reclaim할 수 있게 한다.
 
 ## 조립 원칙
 
