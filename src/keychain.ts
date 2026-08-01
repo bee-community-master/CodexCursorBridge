@@ -25,7 +25,7 @@ export type { KeychainStoreRequest } from "./keychain-child.js";
 const keychainService = "codex-cursor-bridge";
 const keychainAccount = "cursor-api-key";
 const securityCommand = "/usr/bin/security";
-const bootstrapCredentialLockName = ".bootstrap-keychain.sqlite";
+const bootstrapCredentialLockName = `.bootstrap-keychain.${keychainService}.${keychainAccount}.sqlite`;
 const bootstrapCredentialLockTimeoutMs = 30_000;
 const bootstrapCredentialLockRetryDelayMs = 25;
 
@@ -167,9 +167,8 @@ async function canonicalizeTrustedSystemAlias(directory: string): Promise<string
 }
 
 function defaultBootstrapCredentialLockDatabase(): string {
-  const home = process.env.CURSOR_BRIDGE_HOME
-    ?? path.join(os.homedir(), ".config", "codex-cursor-bridge");
-  return path.join(path.resolve(home), bootstrapCredentialLockName);
+  const ownerGlobalHome = path.join(os.homedir(), ".config", "codex-cursor-bridge");
+  return path.join(ownerGlobalHome, bootstrapCredentialLockName);
 }
 
 function defaultSleep(milliseconds: number): Promise<void> {
@@ -377,8 +376,13 @@ export function runBootstrapCredentialChild(
   );
 }
 
-export async function executeKeychainStore(request: KeychainStoreRequest): Promise<void> {
-  const database = await canonicalizeTrustedSystemAlias(defaultBootstrapCredentialLockDatabase());
+export async function executeKeychainStore(
+  request: KeychainStoreRequest,
+  options: Pick<BootstrapCredentialLockOptions, "database"> = {},
+): Promise<void> {
+  const database = await canonicalizeTrustedSystemAlias(
+    options.database ?? defaultBootstrapCredentialLockDatabase(),
+  );
   await executeKeychainStoreProcess(request, database, import.meta.url);
 }
 

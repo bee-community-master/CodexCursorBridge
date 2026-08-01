@@ -4,6 +4,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -171,6 +172,24 @@ async function waitForFileText(file: string, text: string, timeoutMs = 5_000): P
   throw new Error(`timed out waiting for ${text} in ${file}`);
 }
 
+async function waitForDirectoryEntry(
+  directory: string,
+  predicate: (name: string) => boolean,
+  timeoutMs = 5_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const name = (await readdir(directory)).find(predicate);
+      if (name !== undefined) return path.join(directory, name);
+    } catch {
+      // The lock directory has not been created yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for an entry in ${directory}`);
+}
+
 async function waitForProcessGone(pid: number, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -292,14 +311,89 @@ describe("bootstrap credential SQLite lock", () => {
     })).resolves.toBe("recovered");
   });
 
-  it("keeps an interactive child guarded across timezone changes after its bootstrap parent is SIGKILLed", async () => {
+  it("serializes two runtime homes through the owner-global default lock", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cursor-keychain-global-home-"));
+    const globalHome = path.join(root, "owner-home");
+    const firstHome = path.join(root, "runtime-home-first");
+    const secondHome = path.join(root, "runtime-home-second");
+    const events = path.join(root, "events.log");
+    const credential = path.join(root, "credential");
+    const active = path.join(root, "active");
+    const parentScript = `
+      import { appendFileSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
+      import { ensureCursorApiKey, withBootstrapCredentialLock } from "./src/keychain.ts";
+      const mode = process.env.PROBE_MODE;
+      const events = process.env.PROBE_EVENTS;
+      const credential = process.env.PROBE_CREDENTIAL;
+      const active = process.env.PROBE_ACTIVE;
+      await ensureCursorApiKey({
+        inspect: async () => existsSync(credential)
+          ? { kind: "present", value: "probe-key" }
+          : { kind: "missing" },
+        prompt: () => appendFileSync(events, "PROMPT " + mode + "\\n"),
+        store: async () => {
+          let ownsActive = false;
+          try {
+            writeFileSync(active, mode, { flag: "wx" });
+            ownsActive = true;
+          } catch {
+            appendFileSync(events, "OVERLAP " + mode + "\\n");
+          }
+          appendFileSync(events, "STORE START " + mode + "\\n");
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          try {
+            writeFileSync(credential, "probe-key", { flag: "wx" });
+          } catch {
+            appendFileSync(events, "STORE CONFLICT " + mode + "\\n");
+          }
+          if (ownsActive) unlinkSync(active);
+          appendFileSync(events, "STORE END " + mode + "\\n");
+        },
+        withLock: (work) => withBootstrapCredentialLock(work, { timeoutMs: 5_000, retryDelayMs: 5 }),
+      });
+    `;
+    const launchParent = (mode: string, home: string): ChildProcessWithoutNullStreams => {
+      const child = spawn(
+        process.execPath,
+        ["--import", "tsx", "--input-type=module", "-e", parentScript],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            HOME: globalHome,
+            CURSOR_BRIDGE_HOME: home,
+            PROBE_MODE: mode,
+            PROBE_EVENTS: events,
+            PROBE_CREDENTIAL: credential,
+            PROBE_ACTIVE: active,
+          },
+          stdio: ["pipe", "pipe", "pipe"],
+        },
+      );
+      children.push(child);
+      return child;
+    };
+
+    const first = launchParent("first", firstHome);
+    const second = launchParent("second", secondHome);
+    await Promise.all([waitForExit(first), waitForExit(second)]);
+    const contents = await readFile(events, "utf8");
+    expect(contents.match(/^PROMPT /gm)).toHaveLength(1);
+    expect(contents.match(/^STORE START /gm)).toHaveLength(1);
+    expect(contents.match(/^STORE END /gm)).toHaveLength(1);
+    expect(contents).not.toContain("OVERLAP");
+    expect(contents).not.toContain("STORE CONFLICT");
+    expect(await readFile(credential, "utf8")).toBe("probe-key");
+  });
+
+  it("keeps an interactive child guarded across homes and timezone changes after its bootstrap parent is SIGKILLed", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "cursor-keychain-child-crash-"));
     const marker = path.join(root, "prompt-events.log");
     const release = path.join(root, "release-first");
-    const database = path.join(root, ".bootstrap-keychain.sqlite");
-    const childDatabase = `${database}.security-child.sqlite`;
-    const ownerMarker = `${childDatabase}.owner`;
-    const pidMarker = `${childDatabase}.pid`;
+    const globalHome = path.join(root, "owner-home");
+    const firstHome = path.join(root, "runtime-home-first");
+    const secondHome = path.join(root, "runtime-home-second");
+    const lockDirectory = path.join(globalHome, ".config", "codex-cursor-bridge");
     const probeScript = `
       import { appendFileSync, existsSync } from "node:fs";
       const marker = process.env.PROBE_MARKER;
@@ -334,14 +428,14 @@ describe("bootstrap credential SQLite lock", () => {
           ? { kind: "missing" }
           : { kind: "present", value: "probe-key" },
         prompt: () => appendFileSync(process.env.PROBE_MARKER, "PROMPT " + process.env.PROBE_MODE + "\\n"),
-        store: () => executeKeychainStore(request),
+        store: () => executeKeychainStore(request, { database: process.env.PRIMARY_DB }),
         withLock: (work) => withBootstrapCredentialLock(
           work,
-          { database: process.env.PRIMARY_DB, timeoutMs: 5_000, retryDelayMs: 5 },
+          { timeoutMs: 5_000, retryDelayMs: 5 },
         ),
       });
     `;
-    const launchParent = (mode: string, timezone: string): ChildProcessWithoutNullStreams => {
+    const launchParent = (mode: string, timezone: string, home: string): ChildProcessWithoutNullStreams => {
       const child = spawn(
         process.execPath,
         ["--import", "tsx", "--input-type=module", "-e", parentScript],
@@ -349,8 +443,8 @@ describe("bootstrap credential SQLite lock", () => {
           cwd: process.cwd(),
           env: {
             ...process.env,
-            CURSOR_BRIDGE_HOME: root,
-            PRIMARY_DB: database,
+            HOME: globalHome,
+            CURSOR_BRIDGE_HOME: home,
             PROBE_MARKER: marker,
             PROBE_RELEASE: release,
             PROBE_MODE: mode,
@@ -363,15 +457,18 @@ describe("bootstrap credential SQLite lock", () => {
       return child;
     };
 
-    const first = launchParent("first", "UTC");
+    const first = launchParent("first", "UTC", firstHome);
     const firstContents = await waitForFileText(marker, "START first");
     const firstPid = Number(firstContents.match(/START first (\d+)/)?.[1]);
     expect(Number.isInteger(firstPid)).toBe(true);
+    const ownerMarker = await waitForDirectoryEntry(lockDirectory, (name) => name.endsWith(".owner"));
+    const pidMarker = ownerMarker.replace(/\.owner$/, ".pid");
+    await waitForFileText(pidMarker, "\n");
     first.kill("SIGKILL");
     await waitForExit(first);
     await waitForFileText(marker, "TERM first");
 
-    const second = launchParent("second", "Asia/Seoul");
+    const second = launchParent("second", "Asia/Seoul", secondHome);
     await new Promise((resolve) => setTimeout(resolve, 100));
     const blocked = await readFile(marker, "utf8");
     expect(blocked).not.toContain("PROMPT second");
@@ -423,7 +520,7 @@ describe("bootstrap credential SQLite lock", () => {
           ? { kind: "missing" }
           : { kind: "present", value: "probe-key" },
         prompt: () => appendFileSync(process.env.PROBE_MARKER, "PROMPT " + process.env.PROBE_MODE + "\\n"),
-        store: () => executeKeychainStore(request),
+        store: () => executeKeychainStore(request, { database: process.env.PRIMARY_DB }),
         withLock: (work) => withBootstrapCredentialLock(
           work,
           { database: process.env.PRIMARY_DB, timeoutMs: 5_000, retryDelayMs: 5 },
