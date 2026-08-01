@@ -22,6 +22,7 @@ type SubmittedOutcome = {
 };
 
 const cancellationPollMs = 50;
+const cancellationObservationMs = 1_000;
 
 type CursorRunWaitState = Pick<
   PublicationStatePort,
@@ -37,6 +38,43 @@ function eventSummary(event: { type: string; name?: string; status?: string }): 
 
 type RunStreamEvent = { type: string; name?: string; status?: string };
 type StreamConsumeResult = "completed" | "cancellation-recovery";
+type RunWaitResult = Awaited<ReturnType<Run["wait"]>>;
+type RunWaitRaceResult =
+  | { kind: "result"; result: RunWaitResult }
+  | { kind: "error"; error: unknown }
+  | { kind: "cancellation-recovery" };
+
+async function cancellationOutcomeAfterDrain(
+  run: Run,
+  attempt: Attempt,
+  agentId: string,
+  jobId: string,
+  store: CursorRunWaitState,
+  logEvent: (eventKey: string, message: string) => Promise<void>,
+  logSafely: (message: string) => Promise<void>,
+  detail: string | undefined,
+): Promise<ImplementerOutcome> {
+  if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
+    throw new CursorRunEventDeliveryUncertainError(run.id);
+  }
+  return cancellationRecoveryOutcome(run, attempt, agentId, detail);
+}
+
+async function waitForRunResult(
+  run: Run,
+  cancellationRecovery: Promise<void>,
+  cancellationSettlement: Promise<void> | undefined,
+): Promise<RunWaitRaceResult> {
+  const waitResult = await Promise.race<RunWaitRaceResult>([
+    run.wait().then(
+      (result) => ({ kind: "result" as const, result }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    ),
+    cancellationRecovery.then(() => ({ kind: "cancellation-recovery" as const })),
+  ]);
+  if (cancellationSettlement) await Promise.race([cancellationSettlement, cancellationRecovery]);
+  return waitResult;
+}
 
 async function consumeRunStream(
   run: Run,
@@ -112,14 +150,22 @@ export async function waitForOutcome(
   let cancellationRecoveryRequested = false;
   let cancellationAttempted = false;
   let cancellationRecoveryDetail: string | undefined;
+  let cancellationSettlement: Promise<void> | undefined;
+  let cancellationObservationTimer: NodeJS.Timeout | undefined;
   let resolveCancellationRecovery!: () => void;
   const cancellationRecovery = new Promise<void>((resolve) => {
     resolveCancellationRecovery = resolve;
   });
   const cancellationSupported = supportsRunOperation(run, "cancel");
+  const clearCancellationObservation = (): void => {
+    if (!cancellationObservationTimer) return;
+    clearTimeout(cancellationObservationTimer);
+    cancellationObservationTimer = undefined;
+  };
   const requestCancellationRecovery = (detail?: string): void => {
     if (cancellationRecoveryRequested) return;
     cancellationRecoveryRequested = true;
+    clearCancellationObservation();
     cancellationRecoveryDetail = detail
       ?? `RECOVERY_REQUIRED: Cursor cancellation is unavailable for run ${run.id}; no cancel mutation was attempted.`;
     void logSafely(cancellationRecoveryDetail);
@@ -141,14 +187,17 @@ export async function waitForOutcome(
       return;
     }
     cancellationAttempted = true;
-    void Promise.resolve()
+    cancellationObservationTimer = setTimeout(() => requestCancellationRecovery(
+      `CURSOR_TRANSPORT_UNCERTAIN: Cursor cancellation for run ${run.id} did not produce an authoritative terminal result within ${cancellationObservationMs}ms; RECOVERY_REQUIRED: no further cancel mutation was attempted.`,
+    ), cancellationObservationMs);
+    cancellationSettlement = Promise.resolve()
       .then(() => run.cancel())
       .catch((error: unknown) => requestCancellationRecovery(
         `CURSOR_TRANSPORT_UNCERTAIN: Cursor cancellation failed for run ${run.id}; RECOVERY_REQUIRED: no further cancel mutation was attempted: ${safeErrorMessage(error)}`,
-      ))
-      .finally(() => {
-        cancellationCheckActive = false;
-      });
+      ));
+    void cancellationSettlement.finally(() => {
+      cancellationCheckActive = false;
+    }).catch(() => undefined);
   }, cancellationPollMs);
   cancellationTimer.unref();
   try {
@@ -166,13 +215,14 @@ export async function waitForOutcome(
         requestCancellationRecovery,
       );
       if (streamResult === "cancellation-recovery") {
-        if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
-          throw new CursorRunEventDeliveryUncertainError(run.id);
-        }
-        return cancellationRecoveryOutcome(
+        return cancellationOutcomeAfterDrain(
           run,
           attempt,
           agent.agentId,
+          jobId,
+          store,
+          logEvent,
+          logSafely,
           cancellationRecoveryDetail,
         );
       }
@@ -185,7 +235,22 @@ export async function waitForOutcome(
     if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
       throw new CursorRunEventDeliveryUncertainError(run.id);
     }
-    const result = await run.wait();
+    const waitResult = await waitForRunResult(run, cancellationRecovery, cancellationSettlement);
+    if (waitResult.kind === "cancellation-recovery" || cancellationRecoveryRequested) {
+      return cancellationOutcomeAfterDrain(
+        run,
+        attempt,
+        agent.agentId,
+        jobId,
+        store,
+        logEvent,
+        logSafely,
+        cancellationRecoveryDetail,
+      );
+    }
+    if (waitResult.kind === "error") throw waitResult.error;
+    clearCancellationObservation();
+    const result = waitResult.result;
     if (store.isCancellationRequested(jobId) && !cancellationSupported) {
       return cancellationRecoveryOutcome(
         run,
@@ -230,5 +295,6 @@ export async function waitForOutcome(
     };
   } finally {
     clearInterval(cancellationTimer);
+    clearCancellationObservation();
   }
 }

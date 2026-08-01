@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import {
+  chmod,
   mkdtemp,
   mkdir,
   readFile,
@@ -71,6 +72,24 @@ function runPartialEventChild(logPath: string, eventKey: string): Promise<ChildR
       process.kill(process.pid, "SIGKILL");
     `,
     { LOG_PATH: logPath, EVENT_KEY: eventKey },
+  );
+}
+
+function runTrailingEventChild(
+  logPath: string,
+  eventKey: string,
+  eventMessage: string,
+): Promise<ChildResult> {
+  return runChild(
+    `
+      import { createHash } from "node:crypto";
+      import { open } from "node:fs/promises";
+      const marker = "CURSOR_RUN_EVENT:" + createHash("sha256").update(process.env.EVENT_KEY).digest("hex");
+      const handle = await open(process.env.LOG_PATH, "a", 0o600);
+      await handle.write("[" + new Date().toISOString() + "] " + process.env.EVENT_MESSAGE + "\\t" + marker);
+      process.kill(process.pid, "SIGKILL");
+    `,
+    { LOG_PATH: logPath, EVENT_KEY: eventKey, EVENT_MESSAGE: eventMessage },
   );
 }
 
@@ -146,6 +165,35 @@ describe("workflow logger lock recovery", () => {
     const log = await readFile(logPath, "utf8");
     expect(log.split("\n").filter((line) => line.includes("complete event"))).toHaveLength(1);
     expect(log.endsWith("\n")).toBe(true);
+  });
+
+  it("completes an event whose final newline was interrupted without duplicating it", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cursor-log-eof-event-"));
+    const logPath = path.join(root, "job.log");
+    const eventKey = "eof-event-replay";
+    const eventMessage = "complete before newline";
+    const crashed = await runTrailingEventChild(logPath, eventKey, eventMessage);
+    expect(crashed.signal).toBe("SIGKILL");
+
+    const retry = await runLoggerChild(logPath, eventKey, eventMessage);
+    expect(retry, retry.stderr).toMatchObject({ code: 0, signal: null });
+    const log = await readFile(logPath, "utf8");
+    expect(log.split("\n").filter((line) => line.includes(eventMessage))).toHaveLength(1);
+    expect(log.match(/CURSOR_RUN_EVENT:/g)).toHaveLength(1);
+    expect(log.endsWith("\n")).toBe(true);
+  });
+
+  it("normalizes a dedupe hit back to owner-only permissions", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cursor-log-mode-"));
+    const logPath = path.join(root, "job.log");
+    const eventKey = "mode-normalization";
+    const first = await runLoggerChild(logPath, eventKey, "mode event");
+    expect(first, first.stderr).toMatchObject({ code: 0, signal: null });
+    await chmod(logPath, 0o644);
+
+    const second = await runLoggerChild(logPath, eventKey, "mode event");
+    expect(second, second.stderr).toMatchObject({ code: 0, signal: null });
+    expect((await stat(logPath)).mode & 0o777).toBe(0o600);
   });
 
   it("does not quarantine a live mixed-version owner whose child heartbeat is fresh", async () => {
@@ -258,4 +306,26 @@ describe("workflow logger lock recovery", () => {
     expect(result, result.stderr).toMatchObject({ code: 0, signal: null });
     expect(await readFile(logPath, "utf8")).toContain("pid reused recovered");
   });
+
+  it.each([0, -1, Number.MAX_SAFE_INTEGER + 1])(
+    "reclaims a stale owner with an invalid PID (%s)",
+    async (pid) => {
+      const root = await mkdtemp(path.join(tmpdir(), "cursor-log-lock-invalid-pid-"));
+      const logPath = path.join(root, "job.log");
+      const lockPath = `${logPath}.cursor-events.lock`;
+      await mkdir(lockPath);
+      await writeFile(
+        path.join(lockPath, "owner-invalid.json"),
+        JSON.stringify({ pid, token: "invalid", startIdentity: "invalid", state: "held" }),
+        "utf8",
+      );
+      await makeStale(path.join(lockPath, "owner-invalid.json"));
+      await makeStale(lockPath);
+
+      const result = await runLoggerChild(logPath, `invalid-pid-${pid}`, "invalid pid recovered");
+
+      expect(result, result.stderr).toMatchObject({ code: 0, signal: null });
+      expect(await readFile(logPath, "utf8")).toContain("invalid pid recovered");
+    },
+  );
 });

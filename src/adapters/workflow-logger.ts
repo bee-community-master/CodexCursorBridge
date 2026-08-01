@@ -58,6 +58,12 @@ function hasCompleteEventMarker(log: string, marker: string): boolean {
   }
 }
 
+function hasTrailingEventMarkerWithoutNewline(log: string, marker: string): boolean {
+  if (!log || log.endsWith("\n")) return false;
+  const start = log.lastIndexOf("\n") + 1;
+  return hasEventMarker(`${log.slice(start)}\n`, marker);
+}
+
 interface EventLogLockOwner {
   pid: number;
   token: string;
@@ -111,7 +117,8 @@ async function readLegacyLockOwners(lockPath: string): Promise<LegacyLockInspect
         const parsed = JSON.parse(await readFile(ownerPath, { encoding: "utf8" })) as Partial<EventLogLockOwner>;
         if (
           typeof parsed.pid !== "number"
-          || !Number.isInteger(parsed.pid)
+          || !Number.isSafeInteger(parsed.pid)
+          || parsed.pid <= 0
           || typeof parsed.token !== "string"
           || parsed.token.length === 0
           || (parsed.startIdentity !== undefined && typeof parsed.startIdentity !== "string")
@@ -275,7 +282,15 @@ export class FileWorkflowLogger implements WorkflowLogger {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
-      if (hasCompleteEventMarker(existing, marker)) return;
+      if (hasCompleteEventMarker(existing, marker)) {
+        await chmod(job.logPath!, 0o600);
+        return;
+      }
+      if (hasTrailingEventMarkerWithoutNewline(existing, marker)) {
+        await appendFile(job.logPath!, "\n", { encoding: "utf8", mode: 0o600 });
+        await chmod(job.logPath!, 0o600);
+        return;
+      }
       const record = `[${new Date().toISOString()}] ${encodeLogMessage(message)}\t${marker}\n`;
       const separator = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
       await appendFile(

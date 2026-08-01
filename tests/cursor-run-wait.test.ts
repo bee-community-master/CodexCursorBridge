@@ -238,6 +238,126 @@ describe("Cursor run event delivery", () => {
     expect(diagnostics.filter((message) => message.includes("no further cancel mutation"))).toHaveLength(1);
   });
 
+  it("lets a delayed cancellation rejection override an early terminal result", async () => {
+    const runCancel = vi.fn(() => new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error("late cancellation transport reset")), 150);
+    }));
+    const run = {
+      id: "late-rejected-cancel-run",
+      agentId: "agent",
+      status: "running" as const,
+      supports: (): boolean => true,
+      async *stream(): AsyncGenerator<{ type: string }, void> {
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        yield { type: "assistant" };
+      },
+      wait: async () => ({ status: "finished" as const, result: "done" }),
+      cancel: runCancel,
+    } as unknown as Run;
+    const attempt = { ...publishingAttempt(), status: "IMPLEMENTING" as const };
+    const store = {
+      isCancellationRequested: (): boolean => true,
+      beginRunEvent: (): RunEventDeliveryState => "LOGGED",
+      completeRunEvent: (): void => undefined,
+      listPendingRunEvents: (): PendingRunEvent[] => [],
+    };
+
+    const outcome = await waitForOutcome(
+      run,
+      { agentId: "agent" } as SDKAgent,
+      attempt,
+      "job",
+      store,
+      () => undefined,
+      async () => undefined,
+      async () => undefined,
+    );
+
+    expect(outcome.status).toBe("blocked");
+    expect(outcome.reason).toMatch(/CURSOR_TRANSPORT_UNCERTAIN/);
+    expect(runCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences a successful cancel when no terminal stream result arrives", async () => {
+    const runCancel = vi.fn(async () => undefined);
+    const runWait = vi.fn();
+    const run = {
+      id: "hanging-successful-cancel-run",
+      agentId: "agent",
+      status: "running" as const,
+      supports: (): boolean => true,
+      async *stream(): AsyncGenerator<never, void> {
+        await new Promise<void>(() => undefined);
+        if (process.env.NEVER_YIELD) yield undefined as never;
+      },
+      wait: runWait,
+      cancel: runCancel,
+    } as unknown as Run;
+    const attempt = { ...publishingAttempt(), status: "IMPLEMENTING" as const };
+    const store = {
+      isCancellationRequested: (): boolean => true,
+      beginRunEvent: (): RunEventDeliveryState => "LOGGED",
+      completeRunEvent: (): void => undefined,
+      listPendingRunEvents: (): PendingRunEvent[] => [],
+    };
+
+    const outcome = await waitForOutcome(
+      run,
+      { agentId: "agent" } as SDKAgent,
+      attempt,
+      "job",
+      store,
+      () => undefined,
+      async () => undefined,
+      async () => undefined,
+    );
+
+    expect(outcome.status).toBe("blocked");
+    expect(outcome.reason).toMatch(/CURSOR_TRANSPORT_UNCERTAIN/);
+    expect(runCancel).toHaveBeenCalledTimes(1);
+    expect(runWait).not.toHaveBeenCalled();
+  });
+
+  it("races an unsupported cancellation recovery against a hanging wait", async () => {
+    let cancellationChecks = 0;
+    const runWait = vi.fn(() => new Promise<never>(() => undefined));
+    const run = {
+      id: "unsupported-cancel-hanging-wait-run",
+      agentId: "agent",
+      status: "running" as const,
+      supports: (operation: string): boolean => operation !== "cancel",
+      async *stream(): AsyncGenerator<{ type: string }, void> {
+        yield { type: "assistant" };
+      },
+      wait: runWait,
+    } as unknown as Run;
+    const attempt = { ...publishingAttempt(), status: "IMPLEMENTING" as const };
+    const store = {
+      isCancellationRequested: (): boolean => {
+        cancellationChecks += 1;
+        return cancellationChecks > 2;
+      },
+      beginRunEvent: (): RunEventDeliveryState => "LOGGED",
+      completeRunEvent: (): void => undefined,
+      listPendingRunEvents: (): PendingRunEvent[] => [],
+    };
+
+    const outcome = await waitForOutcome(
+      run,
+      { agentId: "agent" } as SDKAgent,
+      attempt,
+      "job",
+      store,
+      () => undefined,
+      async () => undefined,
+      async () => undefined,
+    );
+
+    expect(outcome.status).toBe("blocked");
+    expect(outcome.reason).toMatch(/RECOVERY_REQUIRED/);
+    expect(runWait).toHaveBeenCalledTimes(1);
+  });
+
   it("prioritizes pending delivery uncertainty when stream decoding fails", async () => {
     let pending: PendingRunEvent | undefined;
     let firstLog = true;
