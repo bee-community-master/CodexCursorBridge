@@ -11,7 +11,7 @@ import { runFile } from "./git.js";
 
 const securityCommand = "/usr/bin/security";
 const psCommand = "/bin/ps";
-const psEnvironment: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C" };
+const psEnvironment: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C", TZ: "UTC" };
 const bootstrapCredentialChildLockSuffix = ".security-child.sqlite";
 const bootstrapCredentialChildOwnerSuffix = ".owner";
 const bootstrapCredentialChildPidSuffix = ".pid";

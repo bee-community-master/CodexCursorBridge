@@ -41,7 +41,7 @@ function markerText(pid: number, overrides: Partial<MarkerIdentity> = {}): strin
 
 async function currentProcessIdentity(): Promise<Pick<MarkerIdentity, "uid" | "startIdentity" | "command">> {
   const result = await execFileAsync("/bin/ps", ["-p", String(process.pid), "-o", "uid=,lstart=,command="], {
-    env: { ...process.env, LC_ALL: "C" },
+    env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
     encoding: "utf8",
   });
   const match = /^(\d+)\s+(.{24})\s+(.+)$/s.exec(String(result.stdout).trim());
@@ -292,11 +292,14 @@ describe("bootstrap credential SQLite lock", () => {
     })).resolves.toBe("recovered");
   });
 
-  it("keeps an interactive child guarded after its bootstrap parent is SIGKILLed", async () => {
+  it("keeps an interactive child guarded across timezone changes after its bootstrap parent is SIGKILLed", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "cursor-keychain-child-crash-"));
     const marker = path.join(root, "prompt-events.log");
     const release = path.join(root, "release-first");
     const database = path.join(root, ".bootstrap-keychain.sqlite");
+    const childDatabase = `${database}.security-child.sqlite`;
+    const ownerMarker = `${childDatabase}.owner`;
+    const pidMarker = `${childDatabase}.pid`;
     const probeScript = `
       import { appendFileSync, existsSync } from "node:fs";
       const marker = process.env.PROBE_MARKER;
@@ -338,7 +341,7 @@ describe("bootstrap credential SQLite lock", () => {
         ),
       });
     `;
-    const launchParent = (mode: string): ChildProcessWithoutNullStreams => {
+    const launchParent = (mode: string, timezone: string): ChildProcessWithoutNullStreams => {
       const child = spawn(
         process.execPath,
         ["--import", "tsx", "--input-type=module", "-e", parentScript],
@@ -351,6 +354,7 @@ describe("bootstrap credential SQLite lock", () => {
             PROBE_MARKER: marker,
             PROBE_RELEASE: release,
             PROBE_MODE: mode,
+            TZ: timezone,
           },
           stdio: ["pipe", "pipe", "pipe"],
         },
@@ -359,7 +363,7 @@ describe("bootstrap credential SQLite lock", () => {
       return child;
     };
 
-    const first = launchParent("first");
+    const first = launchParent("first", "UTC");
     const firstContents = await waitForFileText(marker, "START first");
     const firstPid = Number(firstContents.match(/START first (\d+)/)?.[1]);
     expect(Number.isInteger(firstPid)).toBe(true);
@@ -367,11 +371,13 @@ describe("bootstrap credential SQLite lock", () => {
     await waitForExit(first);
     await waitForFileText(marker, "TERM first");
 
-    const second = launchParent("second");
+    const second = launchParent("second", "Asia/Seoul");
     await new Promise((resolve) => setTimeout(resolve, 100));
     const blocked = await readFile(marker, "utf8");
     expect(blocked).not.toContain("PROMPT second");
     expect(blocked).not.toContain("START second");
+    await expect(readFile(ownerMarker, "utf8")).resolves.toContain("startIdentity");
+    await expect(readFile(pidMarker, "utf8")).resolves.toContain("startIdentity");
 
     await writeFile(release, "release\n", { flag: "wx" });
     await waitForFileText(marker, "EXIT first");
@@ -386,7 +392,7 @@ describe("bootstrap credential SQLite lock", () => {
     expect(starts[1]).toContain("START second");
   });
 
-  it("fails closed if the child owner itself crashes while its child is alive", async () => {
+  it("fails closed across timezone changes if the child owner itself crashes while its child is alive", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "cursor-keychain-owner-crash-"));
     const marker = path.join(root, "prompt-events.log");
     const database = path.join(root, ".bootstrap-keychain.sqlite");
@@ -424,7 +430,7 @@ describe("bootstrap credential SQLite lock", () => {
         ),
       });
     `;
-    const launchParent = (mode: string): ChildProcessWithoutNullStreams => {
+    const launchParent = (mode: string, timezone: string): ChildProcessWithoutNullStreams => {
       const child = spawn(
         process.execPath,
         ["--import", "tsx", "--input-type=module", "-e", parentScript],
@@ -436,6 +442,7 @@ describe("bootstrap credential SQLite lock", () => {
             PRIMARY_DB: database,
             PROBE_MARKER: marker,
             PROBE_MODE: mode,
+            TZ: timezone,
           },
           stdio: ["pipe", "pipe", "pipe"],
         },
@@ -444,7 +451,7 @@ describe("bootstrap credential SQLite lock", () => {
       return child;
     };
 
-    const first = launchParent("first");
+    const first = launchParent("first", "UTC");
     const firstContents = await waitForFileText(marker, "START first");
     const firstPid = Number(firstContents.match(/START first (\d+)/)?.[1]);
     const ownerPid = (JSON.parse(await waitForFileText(ownerMarker, "\n")) as MarkerIdentity).pid;
@@ -457,11 +464,13 @@ describe("bootstrap credential SQLite lock", () => {
     await waitForProcessGone(ownerPid);
     await waitForExit(first);
 
-    const second = launchParent("second");
+    const second = launchParent("second", "Asia/Seoul");
     await new Promise((resolve) => setTimeout(resolve, 100));
     const blocked = await readFile(marker, "utf8");
     expect(blocked).not.toContain("PROMPT second");
     expect(blocked).not.toContain("START second");
+    await expect(readFile(ownerMarker, "utf8")).resolves.toContain("startIdentity");
+    await expect(readFile(pidMarker, "utf8")).resolves.toContain("startIdentity");
 
     process.kill(childPid, "SIGKILL");
     await waitForProcessGone(childPid);
