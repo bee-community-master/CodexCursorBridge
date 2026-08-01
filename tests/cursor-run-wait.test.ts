@@ -1,5 +1,5 @@
 import type { Run, SDKAgent } from "@cursor/sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { waitForOutcome } from "../src/adapters/cursor-run-wait.js";
 import type { PendingRunEvent, RunEventDeliveryState } from "../src/application/workflow-ports.js";
 import { publishingAttempt } from "./helpers/workflow-fixtures.js";
@@ -79,5 +79,95 @@ describe("Cursor run event delivery", () => {
     expect(visible).toEqual(["assistant running"]);
     expect(pending).toHaveLength(0);
     expect(logged).toHaveLength(1);
+  });
+
+  it("does not invoke cancel when a requested cancellation is unsupported", async () => {
+    const runCancel = vi.fn(async () => undefined);
+    const run = {
+      id: "uncancellable-run",
+      agentId: "agent",
+      status: "running" as const,
+      supports: (operation: string): boolean => operation !== "cancel",
+      async *stream(): AsyncGenerator<never, void> { /* no events */ },
+      wait: async () => ({ status: "finished" as const, result: "done" }),
+      cancel: runCancel,
+    } as unknown as Run;
+    const attempt = { ...publishingAttempt(), status: "IMPLEMENTING" as const };
+    const store = {
+      isCancellationRequested: (): boolean => true,
+      beginRunEvent: (): RunEventDeliveryState => "LOGGED",
+      completeRunEvent: (): void => undefined,
+      listPendingRunEvents: (): PendingRunEvent[] => [],
+    };
+
+    const outcome = await waitForOutcome(
+      run,
+      { agentId: "agent" } as SDKAgent,
+      attempt,
+      "job",
+      store,
+      () => undefined,
+      async () => undefined,
+      async () => undefined,
+    );
+
+    expect(outcome.status).toBe("blocked");
+    expect(outcome.reason).toMatch(/RECOVERY_REQUIRED/);
+    expect(runCancel).not.toHaveBeenCalled();
+  });
+
+  it("prioritizes pending delivery uncertainty when stream decoding fails", async () => {
+    let pending: PendingRunEvent | undefined;
+    let firstLog = true;
+    const store = {
+      isCancellationRequested: (): boolean => false,
+      beginRunEvent: (
+        _jobId: string,
+        _attemptId: string,
+        _workerToken: string,
+        runId: string,
+        eventKey: string,
+        eventSummary: string,
+      ): RunEventDeliveryState => {
+        if (!pending || pending.eventKey !== eventKey) {
+          pending = { runId, eventKey, eventSummary };
+          return "NEW";
+        }
+        return "PENDING";
+      },
+      completeRunEvent: (): void => { pending = undefined; },
+      listPendingRunEvents: (): PendingRunEvent[] => pending ? [pending] : [],
+    };
+    const run = {
+      id: "decode-failure-run",
+      agentId: "agent",
+      status: "running" as const,
+      async *stream(): AsyncGenerator<{ type: string; status: string }, void> {
+        yield { type: "assistant", status: "running" };
+        throw new Error("stream decode failed");
+      },
+      wait: vi.fn(),
+    } as unknown as Run;
+    const attempt = { ...publishingAttempt(), status: "IMPLEMENTING" as const, cursorRunId: run.id };
+    const visible: string[] = [];
+
+    await expect(waitForOutcome(
+      run,
+      { agentId: "agent" } as SDKAgent,
+      attempt,
+      "job",
+      store,
+      () => undefined,
+      async () => undefined,
+      async (_eventKey, message) => {
+        if (firstLog) {
+          firstLog = false;
+          throw new Error("transient log failure");
+        }
+        visible.push(message);
+      },
+    )).rejects.toThrow(/stream decode failed/);
+    expect(visible).toEqual(["assistant running"]);
+    expect(pending).toBeUndefined();
   });
 });

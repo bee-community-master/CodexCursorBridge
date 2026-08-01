@@ -2,7 +2,12 @@ import type { Run, SDKAgent } from "@cursor/sdk";
 import type { ImplementerOutcome, PublicationStatePort } from "../application/workflow-ports.js";
 import type { Attempt } from "../domain/job.js";
 import { redactSensitiveText, safeErrorMessage } from "../application/redaction.js";
-import { eventKey, stableEventValue } from "./cursor-run-recovery.js";
+import {
+  cancellationRecoveryOutcome,
+  eventKey,
+  stableEventValue,
+  supportsRunOperation,
+} from "./cursor-run-recovery.js";
 import {
   CursorRunEventDeliveryUncertainError,
   deliverRunEvent,
@@ -41,6 +46,13 @@ export async function waitForOutcome(
   const cancellationTimer = setInterval(() => {
     if (cancellationCheckActive || !store.isCancellationRequested(jobId)) return;
     cancellationCheckActive = true;
+    if (!supportsRunOperation(run, "cancel")) {
+      void logSafely(
+        `RECOVERY_REQUIRED: Cursor cancellation is unavailable for run ${run.id}; no cancel mutation was attempted.`,
+      );
+      cancellationCheckActive = false;
+      return;
+    }
     void run.cancel()
       .catch((error: unknown) => logSafely(`Cursor cancellation failed: ${safeErrorMessage(error)}`))
       .finally(() => {
@@ -51,25 +63,35 @@ export async function waitForOutcome(
   try {
     await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id);
     const occurrences = new Map<string, number>();
-    for await (const event of run.stream()) {
-      const signature = stableEventValue(event);
-      const occurrence = occurrences.get(signature) ?? 0;
-      occurrences.set(signature, occurrence + 1);
-      await deliverRunEvent(
-        jobId,
-        attempt,
-        store,
-        run.id,
-        eventKey(event, occurrence),
-        redactSensitiveText(eventSummary(event)),
-        logEvent,
-        logSafely,
-      );
+    try {
+      for await (const event of run.stream()) {
+        const signature = stableEventValue(event);
+        const occurrence = occurrences.get(signature) ?? 0;
+        occurrences.set(signature, occurrence + 1);
+        await deliverRunEvent(
+          jobId,
+          attempt,
+          store,
+          run.id,
+          eventKey(event, occurrence),
+          redactSensitiveText(eventSummary(event)),
+          logEvent,
+          logSafely,
+        );
+      }
+    } catch (error) {
+      if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
+        throw new CursorRunEventDeliveryUncertainError(run.id);
+      }
+      throw error;
     }
     if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
       throw new CursorRunEventDeliveryUncertainError(run.id);
     }
     const result = await run.wait();
+    if (store.isCancellationRequested(jobId) && !supportsRunOperation(run, "cancel")) {
+      return cancellationRecoveryOutcome(run, attempt, agent.agentId);
+    }
     if (result.status === "cancelled" && store.isCancellationRequested(jobId)) {
       return {
         status: "blocked",

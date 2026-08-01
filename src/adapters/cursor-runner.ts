@@ -293,6 +293,7 @@ export class CursorImplementer {
   async cancel(attempt: Attempt): Promise<void> {
     const active = this.#activeRuns.get(attempt.id);
     if (active) {
+      if (!supportsRunOperation(active, "wait") || !supportsRunOperation(active, "cancel")) throw new Error(`RECOVERY_REQUIRED: Cursor run ${active.id} is detached; cancellation cannot be confirmed without a live executor.`);
       await active.cancel();
       await active.wait();
       return;
@@ -413,7 +414,6 @@ export class CursorImplementer {
       }
       const outcome = restoredOutcome(priorRun, attempt, recoveredAgentId, runId);
       if (outcome) return { kind: "outcome", outcome };
-
       // A terminal transport error is safe to follow up only after the local
       // store confirms that no newer run is active for this agent.
       const active = await this.#findActiveRun(recoveredAgentId, options);

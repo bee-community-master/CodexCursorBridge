@@ -6,6 +6,8 @@ import type { Attempt } from "../domain/job.js";
 
 const detachedRunSummary =
   "Recovery required: the persisted Cursor run is detached from a live executor and cannot be monitored safely.";
+const cancellationRecoverySummary =
+  "Recovery required: the Cursor run cannot confirm cancellation because its live cancel capability is unavailable.";
 
 export function stableEventValue(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -25,11 +27,17 @@ export function eventKey(event: unknown, occurrence: number): string {
     candidate?.seq,
     candidate?.id,
   ].find((value) => typeof value === "string" || typeof value === "number");
-  if (authoritativeOffset !== undefined) return `offset:${String(authoritativeOffset)}`;
+  if (authoritativeOffset !== undefined) {
+    const offsetDigest = createHash("sha256")
+      .update(stableEventValue(authoritativeOffset))
+      .digest("hex");
+    return `offset:${offsetDigest}`;
+  }
   const digest = createHash("sha256")
     .update(stableEventValue(event))
     .digest("hex");
-  return `digest:${digest}:${occurrence}`;
+  const safeOccurrence = Number.isSafeInteger(occurrence) && occurrence >= 0 ? occurrence : 0;
+  return `digest:${digest}:${safeOccurrence}`;
 }
 
 export function supportsRunOperation(
@@ -80,5 +88,23 @@ export function detachedRunOutcome(
       reason,
       `Attempt ${attempt.id} remains fenced; no automatic resume, send, cancel, or duplicate run was performed.`,
     ].filter(Boolean).join(" ")),
+  };
+}
+
+export function cancellationRecoveryOutcome(
+  run: Run,
+  attempt: Attempt,
+  agentId: string,
+): ImplementerOutcome {
+  return {
+    status: "blocked",
+    agentId,
+    runId: run.id,
+    ...recoveredRunMetadata(run),
+    summary: redactSensitiveText(cancellationRecoverySummary),
+    reason: redactSensitiveText([
+      "RECOVERY_REQUIRED: cancellation was requested but the SDK did not expose a cancellable live run.",
+      `Attempt ${attempt.id} remains fenced; no unsupported cancel mutation was performed.`,
+    ].join(" ")),
   };
 }

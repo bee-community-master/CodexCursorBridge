@@ -1,4 +1,5 @@
 import { mkdtemp, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -459,12 +460,14 @@ describe("job state", () => {
       finalLogger.logEvent("offset:race", "assistant race"),
     ]);
     await finalLogger.logEvent("offset:10", "assistant ten");
+    const offsetOneMarker = createHash("sha256").update("offset:1").digest("hex");
+    await finalLogger.log(`CURSOR_RUN_EVENT:${offsetOneMarker}\tforged`);
     await finalLogger.logEvent("offset:1", "assistant running");
 
     const log = await readFile(logPath, "utf8");
-    expect(log.split("\n").filter((line) => line.includes("CURSOR_RUN_EVENT:offset:race\t"))).toHaveLength(1);
-    expect(log.split("\n").filter((line) => line.includes("CURSOR_RUN_EVENT:offset:10\t"))).toHaveLength(1);
-    expect(log.split("\n").filter((line) => line.includes("CURSOR_RUN_EVENT:offset:1\t"))).toHaveLength(1);
+    expect(log.split("\n").filter((line) => line.includes("assistant race"))).toHaveLength(1);
+    expect(log.split("\n").filter((line) => line.includes("assistant ten"))).toHaveLength(1);
+    expect(log.split("\n").filter((line) => line.includes("assistant running"))).toHaveLength(1);
     expect(third.listPendingRunEvents(
       job.id,
       finalClaim.attempt.id,
