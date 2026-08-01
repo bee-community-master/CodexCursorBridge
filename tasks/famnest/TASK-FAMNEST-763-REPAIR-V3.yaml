@@ -1,0 +1,404 @@
+id: TASK-FAMNEST-763-REPAIR-V3
+repository: famnest
+title: Repair durable role-safe credit recovery and cross-platform billing UX on PR 781
+spec_version: 3
+goal: "Repair the preserved #763 implementation on draft PR #781 so its role-safe balance and
+  transaction projections, insufficient-credit recovery, threshold notifications, durable PostgreSQL
+  state, RLS, generated contracts, and real Web/Android/iOS integrations satisfy the complete issue
+  contract. Preserve exact Wave3 ancestry: checkpoint a6ae63b9caffca539d4b872899d2efc58563135a must
+  descend from approved Wave3 base 7c3f7a7b82b8af1903d09a512906dc1c931c65c4 without rebasing,
+  force-pushing, or importing another issue."
+context_files:
+  - AGENTS.md
+  - docs/operations/build-contract.md
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - docs/engineering/backend-architecture.md
+  - docs/engineering/web-architecture.md
+  - docs/engineering/android-architecture.md
+  - docs/engineering/ios-architecture.md
+  - packages/shared-types/openapi/famnest-api.json
+  - services/backend/src/famnest_backend/api/v1/billing.py
+  - services/backend/src/famnest_backend/api/v1/ai_jobs.py
+  - services/backend/src/famnest_backend/application/ai_credits.py
+  - services/backend/src/famnest_backend/application/ai_stage_metering.py
+  - services/backend/src/famnest_backend/application/ai_job_run_workflow.py
+  - services/backend/src/famnest_backend/application/dto/ai_credits.py
+  - services/backend/src/famnest_backend/application/dto/ai_job_models.py
+  - services/backend/src/famnest_backend/application/ports/ai_credits.py
+  - services/backend/src/famnest_backend/application/ports/billing_repository.py
+  - services/backend/src/famnest_backend/repositories/billing_adapters.py
+  - services/backend/src/famnest_backend/repositories/postgres_ai_job_persistence.py
+  - services/backend/src/famnest_backend/repositories/postgres_billing_runtime_wrappers.py
+  - services/backend/src/famnest_backend/repositories/postgres_credit_projection_reads.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/billing/credit_projections.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/billing/credit_threshold_notifications.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/notification/mobile_push_sync_lifecycle.py
+  - services/backend/src/famnest_backend/rls.py
+  - services/backend/tests/test_ai_credit_api.py
+  - services/backend/tests/test_ai_stage_metering.py
+  - services/backend/tests/test_credit_threshold_notifications.py
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - services/backend/tests/test_mobile_push_delivery.py
+  - supabase/migrations/20260801090000_family_credit_threshold_notifications.sql
+  - apps/web/src/lib/api/client.ts
+  - apps/web/src/lib/famnest/famnestWebAdapters.ts
+  - apps/web/src/lib/famnest/features/billing/billingApiRepository.ts
+  - apps/web/src/lib/famnest/features/workspace/workspaceBillingController.ts
+  - apps/web/src/lib/famnest/features/workspace/sections/WorkspaceBillingPanel.svelte
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestBillingApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/settings/FamNestSettingsApi.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/settings/FamNestSettingsRepository.kt
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/usecase/SettingsBillingUseCases.kt
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/SettingsBillingPanel.kt
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/SettingsBillingViewModelActions.kt
+  - apps/android/src/main/java/com/elevife/famnest/android/FamNestAndroidUseCaseModule.kt
+  - apps/ios/Sources/FamNestIOSAPI/API/FamNestAPIClient+Billing.swift
+  - apps/ios/Sources/FamNestIOSCore/API/FamilyAiCreditBalanceModels.swift
+  - apps/ios/Sources/FamNestIOSCore/Billing/AppleSubscriptionGatewayPorts.swift
+  - apps/ios/Sources/FamNestIOSApp/AppShell/Billing/State/AppViewModelBillingState.swift
+  - apps/ios/Sources/FamNestIOSApp/Features/Settings/Composition/SettingsPanelStore.swift
+  - apps/ios/Sources/FamNestIOSApp/Features/Settings/CustomerSupport/BillingSupportFormCard.swift
+allowed_paths:
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/**
+  - services/backend/src/famnest_backend/api/v1/billing.py
+  - services/backend/src/famnest_backend/application/billing.py
+  - services/backend/src/famnest_backend/application/ai_credits.py
+  - services/backend/src/famnest_backend/application/dto/billing.py
+  - services/backend/src/famnest_backend/application/ports/billing*.py
+  - services/backend/src/famnest_backend/repositories/billing*.py
+  - services/backend/src/famnest_backend/repositories/postgres_credit*.py
+  - services/backend/src/famnest_backend/repositories/postgres_native_credit*.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/billing/**
+  - services/backend/src/famnest_backend/repositories/domain_runtime/ai/**
+  - services/backend/src/famnest_backend/services/billing*.py
+  - services/backend/tests/**credit**
+  - services/backend/tests/**billing**
+  - services/backend/tests/**usage_metering**
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - supabase/migrations/**
+  - apps/web/src/lib/api/generated/**
+  - apps/web/src/lib/famnest/features/billing/**
+  - apps/web/src/routes/billing/**
+  - apps/web/src/routes/families/**
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestBillingApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/settings/**
+  - apps/android/platform/src/main/java/com/elevife/famnest/android/platform/billing/**
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/SettingsBilling*.kt
+  - apps/android/presentation/src/test/java/com/elevife/famnest/android/**
+  - apps/ios/Sources/FamNestIOSCore/API/*Billing*.swift
+  - apps/ios/Sources/FamNestIOSCore/**
+  - apps/ios/Sources/FamNestIOSApp/Features/Settings/**
+  - apps/ios/Sources/FamNestIOSApp/AppShell/Billing/**
+  - apps/ios/Tests/**
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/api/FamNestCreditBalanceProjectionTest.kt
+  - apps/web/src/lib/famnest/famnestWebAdapters.test-support.ts
+  - apps/web/src/lib/famnest/features/workspace/sections/WorkspaceBillingPanel.svelte
+  - apps/web/src/lib/famnest/features/workspace/sections/WorkspaceBillingPanel.test.ts
+  - apps/web/src/lib/famnest/features/workspace/workspaceBillingController.test.ts
+  - scripts/checks/check_backend_fast_shard_collect.py
+  - services/backend/src/famnest_backend/application/ai_stage_metering.py
+  - services/backend/src/famnest_backend/application/dto/ai_credits.py
+  - services/backend/src/famnest_backend/application/dto/ai_job_models.py
+  - services/backend/src/famnest_backend/application/ports/ai_credits.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/contexts.py
+  - services/backend/src/famnest_backend/repositories/postgres_billing_runtime_wrappers.py
+  - services/backend/tests/test_ai_stage_metering.py
+  - services/backend/src/famnest_backend/api/v1/ai_jobs.py
+  - services/backend/src/famnest_backend/api/v1/internal_worker_ops.py
+  - services/backend/src/famnest_backend/api/dependency_modules/use_case_factories/billing.py
+  - services/backend/src/famnest_backend/api/dependency_modules/use_case_factories/notifications.py
+  - services/backend/src/famnest_backend/api/dependency_modules/use_case_factories/public_worker.py
+  - services/backend/src/famnest_backend/api/dependency_modules/use_case_factories/worker_ai.py
+  - services/backend/src/famnest_backend/application/ai_credit_ledger.py
+  - services/backend/src/famnest_backend/application/ai_credit_models.py
+  - services/backend/src/famnest_backend/application/ai_job_lifecycle_policy.py
+  - services/backend/src/famnest_backend/application/ai_job_responses.py
+  - services/backend/src/famnest_backend/application/ai_job_run_workflow.py
+  - services/backend/src/famnest_backend/application/ai_jobs.py
+  - services/backend/src/famnest_backend/application/dto/ai_jobs.py
+  - services/backend/src/famnest_backend/application/dto/notification_delivery_models.py
+  - services/backend/src/famnest_backend/application/dto/notifications.py
+  - services/backend/src/famnest_backend/application/notifications.py
+  - services/backend/src/famnest_backend/application/ports/ai_jobs.py
+  - services/backend/src/famnest_backend/application/ports/notification_mobile_push.py
+  - services/backend/src/famnest_backend/application/ports/notification_push.py
+  - services/backend/src/famnest_backend/application/ports/notification_repository.py
+  - services/backend/src/famnest_backend/application/ports/permissions.py
+  - services/backend/src/famnest_backend/application/worker_ops.py
+  - services/backend/src/famnest_backend/repositories/notification_adapters.py
+  - services/backend/src/famnest_backend/repositories/postgres_ai_job_finalization.py
+  - services/backend/src/famnest_backend/repositories/postgres_ai_job_persistence.py
+  - services/backend/src/famnest_backend/repositories/postgres_ai_runtime_wrappers.py
+  - services/backend/src/famnest_backend/repositories/postgres_ai_table_reads.py
+  - services/backend/src/famnest_backend/repositories/postgres_billing_persistence.py
+  - services/backend/src/famnest_backend/repositories/postgres_notification_persistence.py
+  - services/backend/src/famnest_backend/repositories/postgres_notification_runtime_wrappers.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_load_ai.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_load_billing.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_load_notification.py
+  - services/backend/src/famnest_backend/repositories/postgres_state_sync.py
+  - services/backend/src/famnest_backend/repositories/postgres_write_persistence.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/assembly_billing_lifecycles.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/assembly_notification_dependent_lifecycles.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/assembly_notification_lifecycles.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/notification/mobile_push_capability.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/notification/mobile_push_sync_lifecycle.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/notification/mobile_push_sync_records.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/notification/payload_policy.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/notification/push_policy.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/notification/repository_capability.py
+  - services/backend/src/famnest_backend/rls.py
+  - services/backend/src/famnest_backend/services/ai_provider.py
+  - services/backend/src/famnest_backend/services/ai_task_dispatcher.py
+  - services/backend/src/famnest_backend/services/firebase_hybrid_push.py
+  - services/backend/tests/test_ai_credit_ledger.py
+  - services/backend/tests/test_ai_stage_metering_architecture.py
+  - services/backend/tests/test_ai_stage_metering_contract_fixture.py
+  - services/backend/tests/test_mobile_push_delivery.py
+  - services/backend/tests/test_notification_push_policy.py
+  - services/backend/tests/test_postgres_ai_stage_metering_recovery.py
+  - services/backend/tests/test_repository_dependencies.py
+  - apps/web/src/lib/api/client.ts
+  - apps/web/src/lib/api/client.test.ts
+  - apps/web/src/lib/famnest/famnestWebAdapters.ts
+  - apps/web/src/lib/famnest/features/workspace/workspaceBillingController.ts
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/port/SettingsBillingModels.kt
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/port/SettingsPorts.kt
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/usecase/SettingsBillingUseCases.kt
+  - apps/android/application/src/test/java/com/elevife/famnest/android/application/usecase/SettingsBillingUseCasesTest.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/settings/FamNestSettingsApi.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/settings/FamNestSettingsRepository.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/settings/SettingsBillingMappers.kt
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/settings/**Billing**
+  - apps/android/platform/src/test/java/com/elevife/famnest/android/platform/billing/**
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/SettingsStateReducers.kt
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/SettingsUiState.kt
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/SettingsViewModel.kt
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/SettingsViewModelDependencies.kt
+  - apps/android/presentation/src/test/java/com/elevife/famnest/android/ui/SettingsBilling*.kt
+  - apps/android/src/main/java/com/elevife/famnest/android/FamNestAndroidPlatformModule.kt
+  - apps/android/src/main/java/com/elevife/famnest/android/FamNestAndroidSettingsActionBindings.kt
+  - apps/android/src/main/java/com/elevife/famnest/android/FamNestAndroidSettingsPresentationBindings.kt
+  - apps/android/src/main/java/com/elevife/famnest/android/FamNestAndroidUseCaseModule.kt
+  - apps/android/src/test/java/com/elevife/famnest/android/ui/FamNestSettingsBillingSmokeTest.kt
+  - apps/android/src/androidTest/java/com/elevife/famnest/android/FamNestConnectedBillingSmokeTest.kt
+  - apps/ios/Sources/FamNestIOSAPI/API/FamNestAPIClient+Billing.swift
+  - apps/ios/Sources/FamNestIOSApp/Composition/**
+  - apps/ios/Sources/FamNestIOSApp/AppShell/Core/Dependencies/AppDomainDependencies.swift
+  - apps/ios/Sources/FamNestIOSApp/Features/Settings/Composition/**
+  - apps/ios/Sources/FamNestIOSApp/Features/Settings/CustomerSupport/BillingSupportFormCard.swift
+forbidden_paths:
+  - .env
+  - .env.*
+  - "**/.env"
+  - "**/.env.*"
+  - "**/credentials/**"
+  - "**/secrets/**"
+  - artifacts/private/**
+  - scripts/release/**
+  - scripts/deploy/**
+  - deployment/**
+  - "**/deployment/**"
+  - infra/**
+  - "**/production/**"
+  - supabase/config.toml
+  - "**/google-services.json"
+  - "**/GoogleService-Info.plist"
+non_goals:
+  - Do not replace the authoritative credit ledger, metering, billing entitlement, native purchase,
+    notification delivery, or AI job lifecycle with a parallel in-memory or UI-only authority.
+  - Do not give Web a checkout capability; Web only explains native purchase and links to an
+    official native store surface.
+  - Do not expose exact balance, expiry, price, purchase history, private AI usage, member or child
+    attribution, raw prompt/output, provider ID, provider dispatch reference, plan title, or private
+    plan existence to child/caregiver projections, telemetry, push payloads, or public errors.
+  - Do not change production store products, provider consoles, live billing or push delivery,
+    production resources, credentials, deployment configuration, or external consoles.
+  - Do not accept focused or in-memory tests as substitutes for freshly migrated PostgreSQL RLS,
+    restart, contention, and durable persistence evidence.
+acceptance_criteria:
+  - Balance and transaction reads use authoritative PostgreSQL state. Parent full view returns exact
+    available/reserved/next-expiry, entitlement, actor-aware can_purchase, and durable
+    balance_revision; child/caregiver availability_only contains only is_available,
+    can_request_parent, and balance_revision. Application authorization and migrated RLS deny exact
+    credit rows and transaction/history reads to child, caregiver, inactive, unrelated, and
+    cross-family actors rather than loading exact data and redacting it afterward.
+  - "Parent transaction history is real cursor pagination ordered occurred_at DESC then
+    ledger_event_id DESC with default 50, max 100, #768 invalid_cursor 422, signed integer
+    centi-credits, bounded display reason/status, and exact category enum. private_ai_usage is
+    derived and durably stored from the provider-dispatch reference classification while provider
+    reference, source filename, prompt/output, plan title, and member/child attribution remain
+    content-free and absent from every projection, audit, metric, push, and client fixture."
+  - "Insufficient-credit handling re-reads current PostgreSQL balance exactly once and retries
+    reserve exactly once before provider dispatch. It preserves balance_revision and an opaque
+    durable resume_token across error boundaries, restart, and replay. First-stage recovery and
+    OCR-success-to-LLM resume are idempotent: retry, double tap, crash, and concurrent workers do
+    not duplicate provider dispatch, reserve, settle, release, ledger event, or resume, and child or
+    caregiver errors disclose neither exact amount nor stage detail."
+  - The 70, 90, and 100 percent recurring-grant thresholds and total-balance-zero event are invoked
+    from a production ledger/application/worker hook, not only a planner test. Top-up-only lots emit
+    no expiry threshold. A durable PostgreSQL uniqueness/claim contract dedupes by family, billing
+    period, lot/event and threshold across restart, replay, and concurrent workers. Only an
+    internal-worker-authorized path may insert/claim events, migrated RLS rejects public writes,
+    targets are active parents only, and delivered push payloads contain only sync_needed,
+    projection revision hint, and opaque event ID.
+  - Web uses the real generated API client and repository for balance and parent cursor pagination;
+    the workspace controller and WorkspaceBillingPanel render role-specific loading, offline
+    last-confirmed read-only, stale, zero, insufficient, pending, success, refund, and
+    terminal/error states. Formatting is locale-aware but always fixed to exactly two fractional
+    digits, including 0, 0.01, 30, 250, and 500. Web purchase controls never initiate checkout.
+  - Android performs real transport-to-repository-to-use-case-to-reducer/ViewModel-to-Compose calls
+    through production DI. iOS performs real generated
+    API-client-to-gateway-to-composition/state-to- SwiftUI calls. Both platforms paginate parent
+    history, aggregate categories, retain an offline last-confirmed read-only projection, implement
+    first-stage and OCR-to-LLM recovery, and expose native purchase pending/double-tap protection
+    while child/caregiver surfaces show only availability and parent-request guidance.
+  - Web, Android, and iOS role-specific UI and real API integration tests cover parent, child,
+    caregiver, inactive, unrelated, and cross-family behavior; cursor pagination; offline/stale;
+    insufficient recovery; transaction/category aggregation; purchase states; and failure
+    visibility. Keyboard/focus order, semantic status announcements, VoiceOver/TalkBack labels,
+    Dynamic Type or 200-percent font scale, narrow screens, reduced motion, touch targets, and
+    disabled/busy states keep amount and CTA perceivable without color alone.
+  - The preserved PR remains descended from exact Wave3 base
+    7c3f7a7b82b8af1903d09a512906dc1c931c65c4 and contains no unrelated Wave3 issue. Freshly migrated
+    PostgreSQL/RLS tests, generated OpenAPI and all platform contracts, focused suites, migration
+    validation, and full repository verification pass at the final tree with exact, non-tautological
+    assertions and visible failures.
+implementation_constraints:
+  - "Recovery context only: source Task TASK-FAMNEST-763-REPAIR-V2 was approved at
+    sha256:e888e0ba17e3242e406f1f13cab123755bbdb25ed9df399dd6eb033fc19117fc. This v3 packet
+    authorizes exactly one fresh isolated attempt from existing draft PR #781 exact head
+    a6ae63b9caffca539d4b872899d2efc58563135a and carries every v2 product-wiring, credit,
+    notification, RLS, privacy, private-AI, formatting, generated-contract, fixture and test
+    requirement without relaxation. Do not reuse, cancel, resume, mutate, or otherwise act on an
+    earlier run."
+  - "Begin from open draft PR #781 at exact checkpoint a6ae63b9caffca539d4b872899d2efc58563135a.
+    Stop if its head moves, it becomes non-draft or closed, its head repository changes, or its
+    merge-base with main is not exact Wave3 base 7c3f7a7b82b8af1903d09a512906dc1c931c65c4."
+  - "The prior SCOPE_VIOLATION's thirteen paths are legitimate #763 integration and test paths and
+    are explicitly authorized above. Preserve the checkpoint and repair forward under this fresh v2
+    approval; do not discard, reconstruct, rebase, force-push, or import another issue."
+  - Independent review currently has clean streak 0. Prior evidence is limited to 23 focused tests,
+    18 Web tests, OpenAPI generation, migration validation, and Android/iOS contract evidence.
+    Independent verification did not run; live/fresh migrated PostgreSQL DB and RLS evidence and
+    full repository verification are absent. Do not treat those partial passes, skipped DB smoke,
+    generated diff failures, or Cursor's summary as completion evidence.
+  - Reuse canonical billing, AI-job, notification, repository-context, generated-client, DI,
+    transaction, RLS, and worker infrastructure. Keep balance, reservation, resume, category,
+    threshold, push, and actor projection decisions server-authoritative and durable; do not trust a
+    client role, cached balance, stage, can_purchase flag, category, resume token, or provider
+    reference as authority.
+  - All credit amounts remain integer centi-credits on the wire and ledger. Conversion is display
+    only, and audit, telemetry, error, notification, and provider payloads remain content-free and
+    role-safe.
+  - "No explorer, subagent, schema probe, plan, research summary, partial implementation, or
+    intermediate verifier may call submit_bridge_outcome. A research summary is non-terminal. Only
+    the lead Cursor task agent may call submit_bridge_outcome once, after all mandatory product
+    wiring, persistence, generated contracts, fixtures, formatting repairs, tests and requested
+    in-agent verification are complete with truthful evidence. The Bridge remains non-terminal until
+    independent verification passes on the exact final tree and remote Draft PR #781 reconciliation
+    succeeds."
+verification:
+  commands:
+    - command: pnpm
+      args:
+        - run
+        - verify:all
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 3600
+    - command: pnpm
+      args:
+        - run
+        - verify:python:fast
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:openapi:full
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1200
+    - command: pnpm
+      args:
+        - run
+        - test:backend:db-smoke
+      env:
+        UV_CACHE_DIR: .uv-cache
+        FAMNEST_BACKEND_DB_SMOKE_APPLY_MIGRATIONS: "1"
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:migrations
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 900
+  profile_hash: sha256:9cd23759c439791ee18b080f15879952e60164c09aa075c0fd14047c7f9fe767
+required_new_tests:
+  - Add freshly migrated PostgreSQL API and RLS coverage for parent full and transaction access,
+    child/caregiver availability-only access without exact-row reads,
+    inactive/unrelated/cross-family denial, actor-aware can_purchase, balance_revision persistence,
+    and resume_token durability.
+  - Add PostgreSQL-path insufficient-credit tests for stale balance re-read once and reserve retry
+    once before provider dispatch, restart and concurrent replay, durable OCR-success-to-LLM resume,
+    no duplicate ledger/reservation/provider effects, and role-safe error redaction.
+  - Add migrated PostgreSQL threshold tests for 70/90/100 recurring grants, no top-up expiry
+    thresholds, total-zero once, production hook invocation, active-parent-only targeting,
+    internal-worker-only insert/claim and RLS, opaque push delivery, and restart/concurrency dedupe.
+  - Add exact private_ai_usage classification and transaction tests proving provider dispatch
+    references map to the aggregate category without exposing reference, content, member, child,
+    plan, source, or provider attribution through storage, projection, generated clients, fixtures,
+    metrics, notifications, or errors.
+  - Add Web real-client/repository/controller/WorkspaceBillingPanel tests for cursor pagination,
+    category aggregation, fixed two-decimal locale formatting, parent versus child/caregiver UI,
+    offline last-confirmed read-only state, every required failure/purchase/refund state,
+    native-only purchase guidance, keyboard/focus/status semantics, reduced motion, and narrow
+    layout.
+  - Add Android transport/repository/use-case/reducer/ViewModel/Compose/DI tests and iOS API-client/
+    gateway/composition/state/SwiftUI tests for real calls, pagination, role-safe UI, offline state,
+    insufficient first-stage and OCR-to-LLM durable resume, native purchase double-tap prevention,
+    category aggregation, error rendering, and platform accessibility semantics.
+  - Regenerate and verify OpenAPI and every Web/Android/iOS contract artifact, then run focused,
+    migrated PostgreSQL/RLS, migration, architecture, and full repository gates with exact
+    assertions for final-tree behavior and failure visibility.
+limits:
+  max_changed_files: 500
+  max_diff_lines: 100000
+  allow_test_deletion: false
+  max_repair_attempts: 2
+stop_conditions:
+  - "Draft PR #781 is closed, non-draft, moved from checkpoint
+    a6ae63b9caffca539d4b872899d2efc58563135a before dispatch, its head repository changes, or its
+    merge-base with main is not exact Wave3 base 7c3f7a7b82b8af1903d09a512906dc1c931c65c4."
+  - A requested behavior requires credentials, production deployment, a live provider/store/push
+    service, production database mutation, store submission, or device-only evidence.
+  - Any repair would expose exact credit/private AI data to a restricted actor or weaken RLS,
+    active-membership checks, actor-aware purchase eligibility, idempotency, durable resume,
+    threshold dedupe, opaque push, retention, or authoritative ledger/metering/purchase contracts.
+  - A change would modify production store products, billing configuration, provider credentials,
+    notification credentials, external consoles, or another Wave3 issue's behavior.
+  - submit_bridge_outcome was consumed before all mandatory implementation and tests completed, or
+    the Bridge cannot keep a research summary and partial verification non-terminal. Stop with
+    truthful evidence; never publish a placeholder success or attempt a second corrective call.
+pull_request:
+  mode: existing_pr
+  number: 781
+status: approved
+spec_hash: sha256:401c5ca9df4c1f13df9ae49e0cd9e11caf92192c626f5345a69205c2e496bce6
+policy_version: 3
+target:
+  origin: HearingOffice/elevife-famnest
+  base_ref: codex/issue-763-cursor-checkpoint
+  destination_ref: main
+  base_sha: a6ae63b9caffca539d4b872899d2efc58563135a
+  context_digest: sha256:296b9efc1fe1bd93103a2f76de8f2676af82c37c7be1a054f028f377e2b2f0f4
+approval:
+  approved_at: 2026-08-01T02:51:43.550Z
+  approved_by: local-user
