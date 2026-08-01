@@ -1,0 +1,263 @@
+id: TASK-FAMNEST-718-IMPLEMENT-V3
+repository: famnest
+title: Implement FamilyTask v2 execution, assignment, readiness, handoff, and lineage contracts
+spec_version: 3
+goal: "Implement issue #718 as the canonical FamilyTask v2 execution contract inside
+  FamilyOperation, preserving existing task storage and permissions while adding revisioned roles,
+  time windows, readiness, execution state, handoff, immutable origin lineage, migration, generated
+  OpenAPI, and Web/iOS/Android compatibility."
+context_files:
+  - AGENTS.md
+  - docs/operations/build-contract.md
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - docs/engineering/backend-architecture.md
+  - docs/engineering/web-architecture.md
+  - docs/engineering/android-architecture.md
+  - docs/engineering/ios-architecture.md
+  - packages/shared-types/openapi/famnest-api.json
+  - services/backend/src/famnest_backend/api/v1/tasks.py
+  - services/backend/src/famnest_backend/api/v1/operations.py
+  - services/backend/src/famnest_backend/application/tasks.py
+  - services/backend/src/famnest_backend/application/operations.py
+  - services/backend/src/famnest_backend/application/dto/task_models.py
+  - services/backend/src/famnest_backend/application/dto/tasks.py
+  - services/backend/src/famnest_backend/application/ports/task_mutations.py
+  - services/backend/src/famnest_backend/application/ports/task_queries.py
+  - services/backend/src/famnest_backend/application/ports/task_assignments.py
+  - services/backend/src/famnest_backend/repositories/task_adapters.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/task/repository_capability.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/family/task_update_lifecycle.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/family/task_assignment_lifecycle.py
+  - services/backend/src/famnest_backend/domain/tasks/policies.py
+  - services/backend/tests/test_domain_task_policies.py
+  - services/backend/tests/test_task_assignment_lifecycle.py
+  - services/backend/tests/test_family_operations.py
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - supabase/migrations/20260502010000_family_operations.sql
+  - supabase/migrations/20260719090000_task_assignment_handoff.sql
+  - apps/web/src/lib/famnest/features/operations/operationsApiRepository.ts
+  - apps/web/src/lib/famnest/features/operations/operationsModels.ts
+  - apps/web/src/lib/famnest/features/operations/operationsUseCases.ts
+  - apps/web/src/lib/famnest/features/input/inputModels.ts
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestCalendarTaskApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/tasks/CalendarTaskApi.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/tasks/CalendarTaskOfflineCommandWriter.kt
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/FamilyTaskActions.kt
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/TaskAssignmentResponseCoordinator.kt
+  - apps/ios/Sources/FamNestIOSCore/API/APIFamilyTaskModels.swift
+  - apps/ios/Sources/FamNestIOSCore/API/APIFamilyOperationModels.swift
+  - apps/ios/Sources/FamNestIOSCore/API/FamNestHTTPTransport.swift
+  - apps/ios/Tests/FamNestIOSCoreTests/OpenAPICalendarTaskDTOPropertyContractTests.swift
+allowed_paths:
+  - docs/engineering/implementation-decisions.md
+  - docs/engineering/v15-common-contracts.md
+  - packages/shared-types/openapi/famnest-api.json
+  - packages/shared-types/fixtures/**
+  - services/backend/src/famnest_backend/api/v1/tasks.py
+  - services/backend/src/famnest_backend/api/v1/operations.py
+  - services/backend/src/famnest_backend/application/tasks.py
+  - services/backend/src/famnest_backend/application/operations.py
+  - services/backend/src/famnest_backend/application/dto/task*.py
+  - services/backend/src/famnest_backend/application/dto/operation*.py
+  - services/backend/src/famnest_backend/application/ports/task*.py
+  - services/backend/src/famnest_backend/application/ports/operation*.py
+  - services/backend/src/famnest_backend/domain/tasks/**
+  - services/backend/src/famnest_backend/repositories/task*.py
+  - services/backend/src/famnest_backend/repositories/operations*.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/task/**
+  - services/backend/src/famnest_backend/repositories/domain_runtime/family/task_*.py
+  - services/backend/src/famnest_backend/repositories/domain_runtime/operations/**
+  - services/backend/tests/**task**
+  - services/backend/tests/**operation**
+  - services/backend/tests/test_migrated_postgres_smoke.py
+  - supabase/migrations/**
+  - apps/web/src/lib/api/generated/**
+  - apps/web/src/lib/famnest/features/operations/**
+  - apps/web/src/lib/famnest/features/tasks/**
+  - apps/web/src/lib/famnest/features/input/**
+  - apps/web/src/routes/families/**
+  - apps/android/application/src/main/java/com/elevife/famnest/android/application/**
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/api/FamNestCalendarTaskApiDtos.kt
+  - apps/android/data/src/main/java/com/elevife/famnest/android/data/tasks/**
+  - apps/android/data/src/test/java/com/elevife/famnest/android/data/tasks/**
+  - apps/android/presentation/src/main/java/com/elevife/famnest/android/ui/home/**
+  - apps/android/presentation/src/test/java/com/elevife/famnest/android/ui/**
+  - apps/ios/Sources/FamNestIOSCore/API/API*Task*.swift
+  - apps/ios/Sources/FamNestIOSCore/API/API*Operation*.swift
+  - apps/ios/Sources/FamNestIOSCore/**
+  - apps/ios/Sources/FamNestIOSApp/AppShell/CalendarTask/**
+  - apps/ios/Sources/FamNestIOSApp/Features/CalendarTask/**
+  - apps/ios/Sources/FamNestIOSApp/Features/Home/Tasks/**
+  - apps/ios/Tests/**
+forbidden_paths:
+  - .env
+  - .env.*
+  - "**/.env"
+  - "**/.env.*"
+  - "**/credentials/**"
+  - "**/secrets/**"
+  - artifacts/private/**
+  - scripts/release/**
+  - scripts/deploy/**
+  - deployment/**
+  - "**/deployment/**"
+  - infra/**
+  - "**/production/**"
+  - supabase/config.toml
+  - "**/google-services.json"
+  - "**/GoogleService-Info.plist"
+non_goals:
+  - Do not create a child-only canonical status store, a second handoff ledger, or a second
+    reminder/ItemFlow/evidence authority.
+  - Do not allow legacy role/time/core-field writes or generic guarded-child offline auto-rebase;
+    retain only compatible reads and offline complete/reopen with strict conflict handling.
+  - Do not grant permissions through executor, owner, helper, beneficiary, or choice_scope fields;
+    existing MemberPermission, family membership, ACL, and RLS remain authoritative.
+  - Do not copy ItemFlow raw content, sensitive provider payloads, reminders, memory text, or
+    authorization data into FamilyTask.
+  - Do not claim production migration execution, live provider/calendar behavior, device/store
+    readiness, or production data effects from repository tests.
+  - Do not modify credentials, deployment configuration, production resources, or external consoles.
+acceptance_criteria:
+  - FamilyTaskV2 persists executor_member_id, optional owner/helper/beneficiary member IDs,
+    hard_deadline with local date plus optional local time and timezone, independent planned_window,
+    choice_scope, bounded ready/done conditions and required_items, item_flow_ref list,
+    execution_context, blocked_reason, immutable origin_lineage, representative_origin, revision,
+    projected started_at, canonical task_status, derived execution_state, and is_overdue. Date-only
+    deadlines remain date-only and reminders remain in their separate ledger.
+  - Role assignment validates same-family membership and resource ACL without adding authority;
+    omitted owner defaults to executor; helper and beneficiary lists are bounded and unique; an
+    executor who cannot read the resource is rejected. Allowed choice_scope values are exactly
+    fixed, time_within_window, order_within_operation, helper_request, and execution_method.
+  - "Canonical storage remains open, completed, or deleted. Deleted tasks disappear from Active,
+    plan, and Today projections. Execution state is derived in the exact order completed, blocked,
+    handoff, not_ready, in_progress, ready, with overdue represented only by is_overdue. start_now
+    records a #725 response/audit active marker and server started_at without changing task
+    structure or plan_revision; reopening clears the active marker but retains history."
+  - blocked_reason uses the fixed typed codes missing_item, waiting_on_person, waiting_on_decision,
+    schedule_conflict, external_dependency, not_ready, assignment_mismatch, or other with bounded
+    note. Conditions, required items, ItemFlow/evidence/origin references, labels, summaries, and
+    mitigation notes enforce the issue bounds, reject duplicate scopes and blank values with 422,
+    and reject cycles or dangling dependencies atomically.
+  - Handoff extends the existing TaskAssignmentResponse record. Reassignment projects an active
+    handoff until the new executor accepts or requests help, and no extra handoff authority is
+    created. Origin lineage is immutable after creation; representative_origin is deterministic in
+    source_verified, family_agreement, user_added, ai_suggestion order and edits add references
+    rather than overwriting provenance.
+  - The v2 command and read DTOs are generated in OpenAPI and consumed by Web, Android, and iOS.
+    assignee_member_id, due_date, and due_time remain read-only compatibility projections. Legacy
+    role/time/core-field mutations return unsupported_legacy_mutation; only existing reads and
+    offline complete/reopen remain compatible. All v2 mutations require expected_revision and
+    Idempotency-Key, while stale updates return 409 plus the latest projection.
+  - Offline complete/reopen stores queue-time Task revision as outbox base_revision. Any mismatch
+    returns a conflict receipt even when the requested target state already matches, never
+    auto-rebases or silently applies, and guarded child reopen is excluded from generic offline
+    recovery. Client projections and conflict UI preserve the latest server state and explicit
+    retry.
+  - The migration is a single strict all-dataset transaction. It deterministically maps legacy
+    assignee and due/source fields, backfills deleted tasks still inside the seven-day recovery
+    window, records migration-review audit for invalid assignees corrected to the family canonical
+    primary parent, and aborts with no changes when any family lacks an active primary parent or any
+    validation/backfill/projection check fails. Repository completion does not claim production data
+    migration.
+  - Authorization and RLS enforce family, member, role, ACL, child-safe projection, and operation
+    visibility rules. Task responses never contain raw memory/provider/sensitive text, and origin,
+    started_at, blocker, reminder, handoff, audit, idempotency, revision, retention, and opaque push
+    fields remain in their owning contracts. Public errors and notifications contain no protected
+    identifiers or payloads.
+  - "Generated Web/iOS/Android contracts, platform repositories/use cases, offline stores, and UI
+    states render v2 projections consistently, keep accessibility and narrow-screen behavior, and
+    preserve existing complete/reopen and child privacy behavior. #713 start_now, #725
+    response/audit, #722/#724 ItemFlow/Handoff, #729/#730/#753 risk and resolver contracts are
+    consumed without bypassing their ownership boundaries."
+implementation_constraints:
+  - "Recovery context only: source Task TASK-FAMNEST-718-IMPLEMENT-V2 was approved at
+    sha256:be53322f31a6705a734eaa9c9275aacc243c62e57b40bd1ef1f7072d2f9efa11. Bridge job
+    fb1c00d4-0a1a-4a0a-a93e-6a2e22eb7e33 terminated BLOCKED solely because its detached worker
+    required human-reviewed recovery; its isolated worktree was clean at exact base
+    7c3f7a7b82b8af1903d09a512906dc1c931c65c4 and it produced no PR. This v3 packet authorizes
+    exactly one fresh isolated attempt. Do not reuse, cancel, resume, mutate, or otherwise act on
+    the old run. No successful terminal outcome may be published until the Bridge independently
+    verifies the exact final tree and completes remote Draft PR reconciliation. This recovery
+    changes no product requirement, acceptance criterion, path scope, verification command, PR mode,
+    or base SHA from v2."
+  - "Recovery context only: prior Bridge job fd7ebb9f-1084-4c12-a9be-c4690b4d6905 terminated as
+    FAILED during force_send; its worktree was clean with zero changed files and no verification was
+    run. The human-reviewed v2 redispatch preserved the exact v1 product scope, acceptance criteria,
+    allowlist, tests, PR mode, and base SHA; this v3 recovery preserves them again, and no
+    product-contract change may be inferred from the transport-layer retry."
+verification:
+  commands:
+    - command: pnpm
+      args:
+        - run
+        - verify:all
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 3600
+    - command: pnpm
+      args:
+        - run
+        - verify:python:fast
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:openapi:full
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 1200
+    - command: pnpm
+      args:
+        - run
+        - test:backend:db-smoke
+      env:
+        UV_CACHE_DIR: .uv-cache
+        FAMNEST_BACKEND_DB_SMOKE_APPLY_MIGRATIONS: "1"
+      timeout_seconds: 1800
+    - command: pnpm
+      args:
+        - run
+        - verify:migrations
+      env:
+        UV_CACHE_DIR: .uv-cache
+      timeout_seconds: 900
+  profile_hash: sha256:9cd23759c439791ee18b080f15879952e60164c09aa075c0fd14047c7f9fe767
+required_new_tests:
+  - Add backend and migrated-Postgres tests for exact time/DST/date-only behavior, role/ACL matrix,
+    all derived execution-state precedence, start marker revisions, bounds, cycles, lineage,
+    handoff, legacy-write rejection, idempotency, and strict offline conflict.
+  - Add migration fixtures for valid backfill, deleted recovery, invalid assignee correction,
+    missing primary-parent global abort, and all-or-nothing validation.
+  - Add OpenAPI and Web, Android, and iOS contract/UI tests for v2 DTOs, read-only legacy
+    projections, offline completion/reopen conflicts, child-safe projections, accessibility, and
+    opaque error/notification shapes.
+limits:
+  max_changed_files: 500
+  max_diff_lines: 100000
+  allow_test_deletion: false
+  max_repair_attempts: 2
+stop_conditions:
+  - A requested behavior requires credentials, production deployment, live provider/calendar,
+    production database mutation, store submission, or device-only evidence.
+  - A dependency contract is missing or incompatible and would require silently changing a
+    parent-owned or earlier-wave contract instead of implementing FamilyTaskV2 within this task.
+  - Any implementation would add a parallel task, reminder, ItemFlow, handoff, permission, or memory
+    authority.
+pull_request:
+  mode: new_draft
+status: approved
+spec_hash: sha256:1c354464f95ac5542bdf6736ae943521b7b0eac4f750610dfe6ac07ea61d42e1
+policy_version: 3
+target:
+  origin: HearingOffice/elevife-famnest
+  base_ref: main
+  destination_ref: main
+  base_sha: 7c3f7a7b82b8af1903d09a512906dc1c931c65c4
+  context_digest: sha256:7ae75e161d2719c87c82a6160ba59bdb75945e20f58dbcf5fa9ed71ac5b4030f
+approval:
+  approved_at: 2026-08-01T01:44:47.139Z
+  approved_by: local-user
