@@ -60,6 +60,55 @@ function runLoggerChild(logPath: string, eventKey: string, eventMessage: string)
   );
 }
 
+function runPartialEventChild(logPath: string, eventKey: string): Promise<ChildResult> {
+  return runChild(
+    `
+      import { createHash } from "node:crypto";
+      import { open } from "node:fs/promises";
+      const marker = "CURSOR_RUN_EVENT:" + createHash("sha256").update(process.env.EVENT_KEY).digest("hex");
+      const handle = await open(process.env.LOG_PATH, "a", 0o600);
+      await handle.write("[" + new Date().toISOString() + "] " + marker + "\\t" + "partial ".repeat(131072));
+      process.kill(process.pid, "SIGKILL");
+    `,
+    { LOG_PATH: logPath, EVENT_KEY: eventKey },
+  );
+}
+
+function runLegacyHolderChild(lockPath: string, readyPath: string): Promise<ChildResult> {
+  return runChild(
+    `
+      import { mkdir, rm, utimes, writeFile } from "node:fs/promises";
+      await mkdir(process.env.LOCK_PATH);
+      const ownerPath = process.env.LOCK_PATH + "/owner-live.json";
+      await writeFile(ownerPath, JSON.stringify({
+        pid: process.pid,
+        token: "live-holder",
+        startIdentity: "holder-test",
+        state: "held",
+      }), "utf8");
+      await writeFile(process.env.READY_PATH, "ready", "utf8");
+      const stale = new Date(Date.now() - 120000);
+      await utimes(process.env.LOCK_PATH, stale, stale);
+      const heartbeat = setInterval(() => {
+        const now = new Date();
+        void utimes(ownerPath, now, now);
+      }, 10);
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      clearInterval(heartbeat);
+      await rm(process.env.LOCK_PATH, { recursive: true, force: true });
+    `,
+    { LOCK_PATH: lockPath, READY_PATH: readyPath },
+  );
+}
+
+async function waitForPath(pathname: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (await stat(pathname).then(() => true).catch(() => false)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`test helper did not create ${pathname}`);
+}
+
 function runCrashChild(lockPath: string, partial: boolean): Promise<ChildResult> {
   return runChild(
     `
@@ -83,6 +132,36 @@ async function makeStale(pathname: string): Promise<void> {
 }
 
 describe("workflow logger lock recovery", () => {
+  it("replays an event after SIGKILL leaves a partial marker line", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cursor-log-partial-event-"));
+    const logPath = path.join(root, "job.log");
+    const eventKey = "partial-event-replay";
+    const crashed = await runPartialEventChild(logPath, eventKey);
+    expect(crashed.signal).toBe("SIGKILL");
+
+    const firstRetry = await runLoggerChild(logPath, eventKey, "complete event");
+    const secondRetry = await runLoggerChild(logPath, eventKey, "complete event");
+    expect(firstRetry, firstRetry.stderr).toMatchObject({ code: 0, signal: null });
+    expect(secondRetry, secondRetry.stderr).toMatchObject({ code: 0, signal: null });
+    const log = await readFile(logPath, "utf8");
+    expect(log.split("\n").filter((line) => line.includes("complete event"))).toHaveLength(1);
+    expect(log.endsWith("\n")).toBe(true);
+  });
+
+  it("does not quarantine a live mixed-version owner whose child heartbeat is fresh", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cursor-log-mixed-lock-"));
+    const logPath = path.join(root, "job.log");
+    const lockPath = `${logPath}.cursor-events.lock`;
+    const readyPath = path.join(root, "holder.ready");
+    const holderPromise = runLegacyHolderChild(lockPath, readyPath);
+    await waitForPath(readyPath);
+    const logger = await runLoggerChild(logPath, "mixed-version-live", "mixed-version recovered");
+    const holder = await holderPromise;
+    expect(holder, holder.stderr).toMatchObject({ code: 0, signal: null });
+    expect(logger, logger.stderr).toMatchObject({ code: 0, signal: null });
+    expect(await readFile(logPath, "utf8")).toContain("mixed-version recovered");
+  });
+
   it("reclaims an empty lock left by a crashed process", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "cursor-log-lock-empty-"));
     const logPath = path.join(root, "job.log");

@@ -28,7 +28,15 @@ function runtimePaths(root: string): RuntimePaths {
 
 async function runPendingClaimShutdownChild(
   signal: "SIGTERM" | "SIGINT",
-): Promise<{ code: number | null; signal: NodeJS.Signals | null; elapsedMs: number; stderr: string; stdout: string; root: string }> {
+): Promise<{
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  elapsedMs: number;
+  shutdownElapsedMs: number;
+  stderr: string;
+  stdout: string;
+  root: string;
+}> {
   const script = `
     import { mkdtemp } from "node:fs/promises";
     import os from "node:os";
@@ -82,6 +90,7 @@ async function runPendingClaimShutdownChild(
   return new Promise((resolve, reject) => {
     let signalled = false;
     let root = "";
+    let signalSentAt: number | undefined;
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error(`shutdown child timed out for ${signal}; stderr=${stderr}`));
@@ -91,6 +100,7 @@ async function runPendingClaimShutdownChild(
       if (!signalled && stdout.includes("READY ")) {
         signalled = true;
         root = stdout.match(/READY ([^\n]+)/)?.[1] ?? "";
+        signalSentAt = Date.now();
         child.kill(signal);
       }
     });
@@ -101,7 +111,16 @@ async function runPendingClaimShutdownChild(
     });
     child.once("exit", (code, childSignal) => {
       clearTimeout(timeout);
-      resolve({ code, signal: childSignal, elapsedMs: Date.now() - startedAt, stderr, stdout, root });
+      const finishedAt = Date.now();
+      resolve({
+        code,
+        signal: childSignal,
+        elapsedMs: finishedAt - startedAt,
+        shutdownElapsedMs: finishedAt - (signalSentAt ?? startedAt),
+        stderr,
+        stdout,
+        root,
+      });
     });
   });
 }
@@ -114,7 +133,9 @@ describe("durable supervisor recovery", () => {
         code: 0,
         signal: null,
       });
-      expect(result.elapsedMs).toBeLessThan(1_500);
+      expect(result.shutdownElapsedMs).toBeLessThan(1_000);
+      expect(result.stdout.indexOf("READY ")).toBeGreaterThanOrEqual(0);
+      expect(result.stdout.indexOf("CLEANUP")).toBeGreaterThan(result.stdout.indexOf("READY "));
       expect(result.stdout).toContain("CLEANUP");
       const replacement = new JobStore(path.join(result.root, "jobs.sqlite"));
       stores.push(replacement);

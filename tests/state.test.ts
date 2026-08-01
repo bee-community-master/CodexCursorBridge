@@ -5,7 +5,12 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { JobStore, STATE_SCHEMA_VERSION } from "../src/state.js";
-import { drainPendingRunEvents, deliverRunEvent } from "../src/adapters/cursor-run-event-outbox.js";
+import type { Job } from "../src/domain/job.js";
+import {
+  drainPendingRunEvents,
+  deliverRunEvent,
+  runEventLogKey,
+} from "../src/adapters/cursor-run-event-outbox.js";
 import { FileWorkflowLogger } from "../src/adapters/workflow-logger.js";
 
 const stores: JobStore[] = [];
@@ -462,7 +467,7 @@ describe("job state", () => {
     await finalLogger.logEvent("offset:10", "assistant ten");
     const offsetOneMarker = createHash("sha256").update("offset:1").digest("hex");
     await finalLogger.log(`CURSOR_RUN_EVENT:${offsetOneMarker}\tforged`);
-    await finalLogger.logEvent("offset:1", "assistant running");
+    await finalLogger.logEvent(runEventLogKey("run-outbox", "offset:1"), "assistant running");
 
     const log = await readFile(logPath, "utf8");
     expect(log.split("\n").filter((line) => line.includes("assistant race"))).toHaveLength(1);
@@ -482,6 +487,22 @@ describe("job state", () => {
       "offset:1",
       "assistant running",
     )).toBe("LOGGED");
+  });
+
+  it("deduplicates an event per run while preserving the same offset across runs", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "cursor-state-event-run-identity-"));
+    const logPath = path.join(dir, "job.log");
+    const logger = new FileWorkflowLogger(
+      { get: (): Job => ({ logPath } as Job) },
+      "job",
+    );
+    await logger.logEvent(runEventLogKey("run-a", "offset:1"), "run a event");
+    await logger.logEvent(runEventLogKey("run-a", "offset:1"), "run a event");
+    await logger.logEvent(runEventLogKey("run-b", "offset:1"), "run b event");
+
+    const log = await readFile(logPath, "utf8");
+    expect(log.split("\n").filter((line) => line.includes("run a event"))).toHaveLength(1);
+    expect(log.split("\n").filter((line) => line.includes("run b event"))).toHaveLength(1);
   });
 
   it("summarizes local delivery and first-attempt effectiveness", async () => {

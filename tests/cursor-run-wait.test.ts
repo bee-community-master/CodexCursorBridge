@@ -194,6 +194,50 @@ describe("Cursor run event delivery", () => {
     expect(diagnostics.filter((message) => message.includes("no cancel mutation"))).toHaveLength(1);
   });
 
+  it("fences after one rejected cancellation without retrying the mutation", async () => {
+    const runCancel = vi.fn(async () => {
+      throw new Error("transport reset after cancellation request");
+    });
+    const runWait = vi.fn();
+    const run = {
+      id: "rejected-cancel-run",
+      agentId: "agent",
+      status: "running" as const,
+      supports: (): boolean => true,
+      async *stream(): AsyncGenerator<never, void> {
+        await new Promise<void>(() => undefined);
+        if (process.env.NEVER_YIELD) yield undefined as never;
+      },
+      wait: runWait,
+      cancel: runCancel,
+    } as unknown as Run;
+    const attempt = { ...publishingAttempt(), status: "IMPLEMENTING" as const };
+    const store = {
+      isCancellationRequested: (): boolean => true,
+      beginRunEvent: (): RunEventDeliveryState => "LOGGED",
+      completeRunEvent: (): void => undefined,
+      listPendingRunEvents: (): PendingRunEvent[] => [],
+    };
+    const diagnostics: string[] = [];
+
+    const outcome = await waitForOutcome(
+      run,
+      { agentId: "agent" } as SDKAgent,
+      attempt,
+      "job",
+      store,
+      () => undefined,
+      async (message) => { diagnostics.push(message); },
+      async () => undefined,
+    );
+
+    expect(outcome.status).toBe("blocked");
+    expect(outcome.reason).toMatch(/CURSOR_TRANSPORT_UNCERTAIN/);
+    expect(runCancel).toHaveBeenCalledTimes(1);
+    expect(runWait).not.toHaveBeenCalled();
+    expect(diagnostics.filter((message) => message.includes("no further cancel mutation"))).toHaveLength(1);
+  });
+
   it("prioritizes pending delivery uncertainty when stream decoding fails", async () => {
     let pending: PendingRunEvent | undefined;
     let firstLog = true;

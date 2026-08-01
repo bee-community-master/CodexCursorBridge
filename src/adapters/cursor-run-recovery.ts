@@ -7,7 +7,7 @@ import type { Attempt } from "../domain/job.js";
 const detachedRunSummary =
   "Recovery required: the persisted Cursor run is detached from a live executor and cannot be monitored safely.";
 const cancellationRecoverySummary =
-  "Recovery required: the Cursor run cannot confirm cancellation because its live cancel capability is unavailable.";
+  "Recovery required: the Cursor run cannot confirm cancellation because its live cancel operation is unavailable or failed.";
 
 export function stableEventValue(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -106,6 +106,7 @@ export function cancellationRecoveryOutcome(
   run: Run,
   attempt: Attempt,
   agentId: string,
+  detail?: string,
 ): ImplementerOutcome {
   return {
     status: "blocked",
@@ -114,8 +115,8 @@ export function cancellationRecoveryOutcome(
     ...recoveredRunMetadata(run),
     summary: redactSensitiveText(cancellationRecoverySummary),
     reason: redactSensitiveText([
-      "RECOVERY_REQUIRED: cancellation was requested but the SDK did not expose a cancellable live run.",
-      `Attempt ${attempt.id} remains fenced; no unsupported cancel mutation was performed.`,
+      detail ?? "RECOVERY_REQUIRED: cancellation was requested but the SDK did not expose a cancellable live run.",
+      `Attempt ${attempt.id} remains fenced; no further cancel mutation was performed.`,
     ].join(" ")),
   };
 }

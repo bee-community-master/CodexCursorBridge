@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Attempt } from "../domain/job.js";
 import type { PublicationStatePort } from "../application/workflow-ports.js";
 import { safeErrorMessage } from "../application/redaction.js";
@@ -13,6 +14,11 @@ type RunEventStore = Pick<
   PublicationStatePort,
   "beginRunEvent" | "completeRunEvent" | "listPendingRunEvents"
 >;
+
+export function runEventLogKey(runId: string, eventKey: string): string {
+  const canonical = `${runId.length}:${runId}${eventKey.length}:${eventKey}`;
+  return `run-event:${createHash("sha256").update(canonical).digest("hex")}`;
+}
 
 export async function deliverRunEvent(
   jobId: string,
@@ -33,11 +39,12 @@ export async function deliverRunEvent(
     eventSummary,
   );
   if (state === "LOGGED") return true;
+  const logKey = runEventLogKey(runId, eventKey);
   try {
-    await logEvent(eventKey, eventSummary);
+    await logEvent(logKey, eventSummary);
   } catch (error) {
     await logSafely(
-      `Cursor run event delivery remains pending key=${eventKey} error=${safeErrorMessage(error)}`,
+      `Cursor run event delivery remains pending key=${logKey} error=${safeErrorMessage(error)}`,
     );
     return false;
   }

@@ -46,10 +46,16 @@ async function consumeRunStream(
   logSafely: (message: string) => Promise<void>,
   logEvent: (eventKey: string, message: string) => Promise<void>,
   cancellationRecovery: Promise<void>,
+  cancellationSupported: boolean,
+  requestCancellationRecovery: (detail?: string) => void,
 ): Promise<StreamConsumeResult> {
   const iterator = run.stream()[Symbol.asyncIterator]();
   const occurrences = new Map<string, number>();
   for (;;) {
+    if (!cancellationSupported && store.isCancellationRequested(jobId)) {
+      requestCancellationRecovery();
+      return "cancellation-recovery";
+    }
     const nextResult = iterator.next().then(
       (result) => ({ kind: "event" as const, result }),
       (error: unknown) => ({ kind: "error" as const, error }),
@@ -104,26 +110,42 @@ export async function waitForOutcome(
 
   let cancellationCheckActive = false;
   let cancellationRecoveryRequested = false;
+  let cancellationAttempted = false;
+  let cancellationRecoveryDetail: string | undefined;
   let resolveCancellationRecovery!: () => void;
   const cancellationRecovery = new Promise<void>((resolve) => {
     resolveCancellationRecovery = resolve;
   });
+  const cancellationSupported = supportsRunOperation(run, "cancel");
+  const requestCancellationRecovery = (detail?: string): void => {
+    if (cancellationRecoveryRequested) return;
+    cancellationRecoveryRequested = true;
+    cancellationRecoveryDetail = detail
+      ?? `RECOVERY_REQUIRED: Cursor cancellation is unavailable for run ${run.id}; no cancel mutation was attempted.`;
+    void logSafely(cancellationRecoveryDetail);
+    resolveCancellationRecovery();
+  };
   const cancellationTimer = setInterval(() => {
     if (
       cancellationCheckActive
+      || cancellationAttempted
       || cancellationRecoveryRequested
       || !store.isCancellationRequested(jobId)
     ) return;
     cancellationCheckActive = true;
-    if (!supportsRunOperation(run, "cancel")) {
-      cancellationRecoveryRequested = true;
-      void logSafely(`RECOVERY_REQUIRED: Cursor cancellation is unavailable for run ${run.id}; no cancel mutation was attempted.`);
-      resolveCancellationRecovery();
+    if (!cancellationSupported) {
+      requestCancellationRecovery(
+        `RECOVERY_REQUIRED: Cursor cancellation is unavailable for run ${run.id}; no cancel mutation was attempted.`,
+      );
       cancellationCheckActive = false;
       return;
     }
-    void run.cancel()
-      .catch((error: unknown) => logSafely(`Cursor cancellation failed: ${safeErrorMessage(error)}`))
+    cancellationAttempted = true;
+    void Promise.resolve()
+      .then(() => run.cancel())
+      .catch((error: unknown) => requestCancellationRecovery(
+        `CURSOR_TRANSPORT_UNCERTAIN: Cursor cancellation failed for run ${run.id}; RECOVERY_REQUIRED: no further cancel mutation was attempted: ${safeErrorMessage(error)}`,
+      ))
       .finally(() => {
         cancellationCheckActive = false;
       });
@@ -140,12 +162,19 @@ export async function waitForOutcome(
         logSafely,
         logEvent,
         cancellationRecovery,
+        cancellationSupported,
+        requestCancellationRecovery,
       );
       if (streamResult === "cancellation-recovery") {
         if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
           throw new CursorRunEventDeliveryUncertainError(run.id);
         }
-        return cancellationRecoveryOutcome(run, attempt, agent.agentId);
+        return cancellationRecoveryOutcome(
+          run,
+          attempt,
+          agent.agentId,
+          cancellationRecoveryDetail,
+        );
       }
     } catch (error) {
       if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
@@ -157,8 +186,13 @@ export async function waitForOutcome(
       throw new CursorRunEventDeliveryUncertainError(run.id);
     }
     const result = await run.wait();
-    if (store.isCancellationRequested(jobId) && !supportsRunOperation(run, "cancel")) {
-      return cancellationRecoveryOutcome(run, attempt, agent.agentId);
+    if (store.isCancellationRequested(jobId) && !cancellationSupported) {
+      return cancellationRecoveryOutcome(
+        run,
+        attempt,
+        agent.agentId,
+        cancellationRecoveryDetail,
+      );
     }
     if (result.status === "cancelled" && store.isCancellationRequested(jobId)) {
       return {
