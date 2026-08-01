@@ -39,6 +39,7 @@ import {
   detachedRunOutcome,
   recoveredRunMetadata,
   supportsRunOperation,
+  unsupportedRunOperation,
 } from "./cursor-run-recovery.js";
 import {
   CursorRunEventDeliveryUncertainError,
@@ -396,13 +397,11 @@ export class CursorImplementer {
       }
       const recoveredAgentId = agentId ?? priorRun.agentId;
       if (priorRun.status === "running") {
-        if (
-          !supportsRunOperation(priorRun, "wait")
-          || (hasPersistedOutcome(attempt) && !supportsRunOperation(priorRun, "cancel"))
-        ) {
+        const unsupportedOperation = unsupportedRunOperation(priorRun, hasPersistedOutcome(attempt));
+        if (unsupportedOperation) {
           return {
             kind: "recovery-required",
-            outcome: detachedRunOutcome(priorRun, attempt, recoveredAgentId),
+            outcome: detachedRunOutcome(priorRun, attempt, recoveredAgentId, unsupportedOperation),
           };
         }
         if (hasPersistedOutcome(attempt)) {
@@ -418,10 +417,11 @@ export class CursorImplementer {
       // store confirms that no newer run is active for this agent.
       const active = await this.#findActiveRun(recoveredAgentId, options);
       if (active) {
-        if (!supportsRunOperation(active, "wait")) {
+        const unsupportedOperation = unsupportedRunOperation(active);
+        if (unsupportedOperation) {
           return {
             kind: "recovery-required",
-            outcome: detachedRunOutcome(active, attempt, recoveredAgentId),
+            outcome: detachedRunOutcome(active, attempt, recoveredAgentId, unsupportedOperation),
           };
         }
         await this.#bindRun(attempt, recoveredAgentId, active);
@@ -432,10 +432,11 @@ export class CursorImplementer {
     if (!agentId) return { kind: "new" };
     const active = await this.#findActiveRun(agentId, options);
     if (active) {
-      if (!supportsRunOperation(active, "wait")) {
+      const unsupportedOperation = unsupportedRunOperation(active);
+      if (unsupportedOperation) {
         return {
           kind: "recovery-required",
-          outcome: detachedRunOutcome(active, attempt, agentId),
+          outcome: detachedRunOutcome(active, attempt, agentId, unsupportedOperation),
         };
       }
       await this.#bindRun(attempt, agentId, active);
@@ -443,7 +444,6 @@ export class CursorImplementer {
     }
     return { kind: "new" };
   }
-
   async #readPriorRun(
     runId: string,
     options: LocalCursorRunOptions,
@@ -461,7 +461,6 @@ export class CursorImplementer {
       throw new Error(`Could not safely recover the prior Cursor run: ${detail}`);
     }
   }
-
   async #findActiveRun(
     agentId: string,
     options: LocalCursorRunOptions,
@@ -558,9 +557,8 @@ export class CursorImplementer {
     let current = run;
     for (let retry = 1; retry <= CURSOR_TRANSPORT_MAX_ATTEMPTS; retry += 1) {
       try {
-        if (current.status === "running" && !supportsRunOperation(current, "wait")) {
-          return detachedRunOutcome(current, attempt, agent.agentId);
-        }
+        if (current.status === "running" && !supportsRunOperation(current, "wait")) return detachedRunOutcome(current, attempt, agent.agentId, "wait");
+        if (current.status === "running" && !supportsRunOperation(current, "stream")) return detachedRunOutcome(current, attempt, agent.agentId, "stream");
         return await waitForOutcome(
           current,
           agent,
@@ -613,21 +611,23 @@ export class CursorImplementer {
   ): Promise<RecoveredCursorRun> {
     const run = await this.#readPriorRun(runId, options);
     if (run.status === "running") {
-      return supportsRunOperation(run, "wait")
-        ? { kind: "active", run }
-        : {
+      const unsupportedOperation = unsupportedRunOperation(run);
+      return unsupportedOperation
+        ? {
           kind: "recovery-required",
-          outcome: detachedRunOutcome(run, attempt, agentId),
-        };
+          outcome: detachedRunOutcome(run, attempt, agentId, unsupportedOperation),
+        }
+        : { kind: "active", run };
     }
     const outcome = restoredOutcome(run, attempt, agentId, runId);
     if (outcome) return { kind: "outcome", outcome };
     const active = await this.#findActiveRun(agentId, options);
     if (active) {
-      if (!supportsRunOperation(active, "wait")) {
+      const unsupportedOperation = unsupportedRunOperation(active);
+      if (unsupportedOperation) {
         return {
           kind: "recovery-required",
-          outcome: detachedRunOutcome(active, attempt, agentId),
+          outcome: detachedRunOutcome(active, attempt, agentId, unsupportedOperation),
         };
       }
       await this.#bindRun(attempt, agentId, active);

@@ -3,6 +3,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  stat,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -109,6 +110,26 @@ describe("workflow logger lock recovery", () => {
 
     expect(result, result.stderr).toMatchObject({ code: 0, signal: null });
     expect(await readFile(logPath, "utf8")).toContain("partial recovered");
+  });
+
+  it.each([
+    ["legacy-json", JSON.stringify({ pid: 99_999_999, token: "legacy" })],
+    ["legacy-empty", ""],
+    ["legacy-partial", "{\"pid\":"],
+  ])("quarantines an aged legacy regular-file lock without losing the log (%s)", async (_name, contents) => {
+    const root = await mkdtemp(path.join(tmpdir(), "cursor-log-legacy-lock-"));
+    const logPath = path.join(root, "job.log");
+    const lockPath = `${logPath}.cursor-events.lock`;
+    await writeFile(logPath, "prior diagnostic\n", "utf8");
+    await writeFile(lockPath, contents, "utf8");
+    await makeStale(lockPath);
+
+    const result = await runLoggerChild(logPath, `legacy-${_name}`, "legacy recovered");
+
+    expect(result, result.stderr).toMatchObject({ code: 0, signal: null });
+    expect(await readFile(logPath, "utf8")).toContain("prior diagnostic");
+    expect(await readFile(logPath, "utf8")).toContain("legacy recovered");
+    await expect(stat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("does not let two reclaimers delete a newly claimed owner", async () => {

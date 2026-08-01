@@ -1,28 +1,21 @@
 import { createHash, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import {
   appendFile,
   chmod,
-  mkdir,
   readFile,
-  readdir,
   rename,
   rm,
-  rmdir,
   stat,
-  unlink,
-  utimes,
-  writeFile,
 } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { redactSensitiveText } from "../application/redaction.js";
 import type { PublicationStatePort } from "../application/workflow-ports.js";
 
 const eventLogLockRetryMs = 5;
+const legacyLockRetryMs = 100;
 const eventLogLockStaleMs = 30_000;
-const eventLogLockHeartbeatMs = 5_000;
-const ownerFilePrefix = "owner-";
-const execFileAsync = promisify(execFile);
+const legacyLockSuffix = ".cursor-events.lock";
+const sqliteLockSuffix = ".cursor-events.sqlite";
 
 function eventMarker(eventKey: string): string {
   return `CURSOR_RUN_EVENT:${createHash("sha256").update(eventKey).digest("hex")}`;
@@ -45,180 +38,81 @@ function hasEventMarker(line: string, marker: string): boolean {
     && !line.slice(1, timestampEnd).includes("\n");
 }
 
-interface EventLogLockOwner {
-  pid: number;
-  token: string;
-  startIdentity?: string;
-  state: "held" | "released";
+function isSqliteBusy(error: unknown): boolean {
+  const candidate = error as { code?: unknown; message?: unknown } | undefined;
+  return candidate?.code === "ERR_SQLITE_BUSY"
+    || /(?:database is locked|SQLITE_BUSY)/i.test(String(candidate?.message ?? error));
 }
 
-interface LockOwnerSnapshot {
-  owner: EventLogLockOwner;
-  ownerPath: string;
-  mtimeMs: number;
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-let ownStartIdentity: Promise<string | undefined> | undefined;
-
-async function processStartIdentity(pid: number): Promise<string | undefined> {
-  try {
-    const result = await execFileAsync("ps", ["-p", String(pid), "-o", "lstart="], {
-      timeout: 1_000,
-    });
-    const identity = String(result.stdout).trim();
-    return identity || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function currentProcessStartIdentity(): Promise<string | undefined> {
-  ownStartIdentity ??= processStartIdentity(process.pid);
-  return ownStartIdentity;
-}
-
-async function readLockOwner(lockPath: string): Promise<LockOwnerSnapshot | undefined> {
-  try {
-    const names = await readdir(lockPath);
-    const ownerNames = names.filter((name) =>
-      name.startsWith(ownerFilePrefix) && name.endsWith(".json"));
-    if (ownerNames.length !== 1) return undefined;
-    const ownerName = ownerNames[0]!;
-    const ownerPath = `${lockPath}/${ownerName}`;
-    const parsed = JSON.parse(await readFile(ownerPath, { encoding: "utf8" })) as Partial<EventLogLockOwner>;
-    if (
-      typeof parsed.pid !== "number"
-      || !Number.isInteger(parsed.pid)
-      || typeof parsed.token !== "string"
-      || parsed.token.length === 0
-      || (parsed.startIdentity !== undefined && typeof parsed.startIdentity !== "string")
-      || (parsed.state !== "held" && parsed.state !== "released")
-    ) return undefined;
-    const ownerStat = await stat(ownerPath);
-    return {
-      owner: {
-        pid: parsed.pid,
-        token: parsed.token,
-        ...(parsed.startIdentity ? { startIdentity: parsed.startIdentity } : {}),
-        state: parsed.state,
-      },
-      ownerPath,
-      mtimeMs: ownerStat.mtimeMs,
-    };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR" || error instanceof SyntaxError) return undefined;
-    throw error;
-  }
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
-async function ownerIsAlive(owner: EventLogLockOwner): Promise<boolean> {
-  if (owner.state === "released") return false;
-  if (!processIsAlive(owner.pid)) return false;
-  if (!owner.startIdentity) return false;
-  const currentIdentity = await processStartIdentity(owner.pid);
-  return currentIdentity === owner.startIdentity;
-}
-
-async function refreshEventLogLock(snapshotPath: string, owner: EventLogLockOwner): Promise<void> {
-  const current = await readLockOwner(snapshotPath);
-  if (!current || current.owner.pid !== owner.pid || current.owner.token !== owner.token) return;
-  const now = new Date();
-  await utimes(current.ownerPath, now, now);
-}
-
-async function releaseEventLogLock(
-  lockPath: string,
-  ownerPath: string,
-  owner: EventLogLockOwner,
-): Promise<void> {
-  const current = await readLockOwner(lockPath);
-  if (current && current.owner.pid === owner.pid && current.owner.token === owner.token) {
-    await writeFile(ownerPath, JSON.stringify({ ...owner, state: "released" }), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-  }
-  await unlink(ownerPath).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  });
-  await rmdir(lockPath).catch((error: unknown) => {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") throw error;
-  });
-}
-
-async function reclaimStaleEventLogLock(lockPath: string): Promise<void> {
-  const snapshot = await readLockOwner(lockPath);
-  const lockStat = await stat(lockPath).catch((error: unknown) => {
+async function retireLegacyEventLogLock(logPath: string): Promise<boolean> {
+  const legacyPath = `${logPath}${legacyLockSuffix}`;
+  const lockStat = await stat(legacyPath).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   });
-  if (!lockStat) return;
-  const lastActivityMs = snapshot?.mtimeMs ?? lockStat.mtimeMs;
-  if (Date.now() - lastActivityMs <= eventLogLockStaleMs) return;
-  if (snapshot && await ownerIsAlive(snapshot.owner)) return;
-  const quarantinePath = `${lockPath}.stale-${randomUUID()}`;
+  if (!lockStat) return true;
+  if (Date.now() - lockStat.mtimeMs <= eventLogLockStaleMs) return false;
+
+  const quarantinePath = `${legacyPath}.stale-${randomUUID()}`;
   try {
-    await rename(lockPath, quarantinePath);
+    await rename(legacyPath, quarantinePath);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
-    return;
+    if (code === "ENOENT") return true;
+    throw error;
   }
   await rm(quarantinePath, { recursive: true, force: true });
+  return true;
 }
 
 async function withEventLogLock<T>(
   logPath: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const lockPath = `${logPath}.cursor-events.lock`;
+  const databasePath = `${logPath}${sqliteLockSuffix}`;
   for (;;) {
-    const startIdentity = await currentProcessStartIdentity();
-    const owner: EventLogLockOwner = {
-      pid: process.pid,
-      token: randomUUID(),
-      ...(startIdentity ? { startIdentity } : {}),
-      state: "held",
-    };
-    const claimPath = `${lockPath}.claim-${owner.token}`;
-    const claimOwnerPath = `${claimPath}/${ownerFilePrefix}${owner.token}.json`;
-    let claimCreated = false;
-    let claimed = false;
+    let database: DatabaseSync | undefined;
+    let transactionOpen = false;
     try {
-      await mkdir(claimPath, { mode: 0o700 });
-      claimCreated = true;
-      await writeFile(claimOwnerPath, JSON.stringify(owner), { encoding: "utf8", mode: 0o600 });
-      await rename(claimPath, lockPath);
-      claimed = true;
-      const ownerPath = `${lockPath}/${ownerFilePrefix}${owner.token}.json`;
-      const heartbeat = setInterval(() => {
-        void refreshEventLogLock(lockPath, owner).catch(() => undefined);
-      }, eventLogLockHeartbeatMs);
+      database = new DatabaseSync(databasePath);
+      await chmod(databasePath, 0o600);
+      // Do not block the Node event loop while another logger transaction is
+      // active; the retry below yields so that owner can finish and roll back.
+      database.exec("PRAGMA busy_timeout = 0");
+      database.exec("BEGIN IMMEDIATE");
+      transactionOpen = true;
+      if (!await retireLegacyEventLogLock(logPath)) {
+        database.exec("ROLLBACK");
+        transactionOpen = false;
+        database.close();
+        database = undefined;
+        await sleep(legacyLockRetryMs);
+        continue;
+      }
       try {
         return await operation();
       } finally {
-        clearInterval(heartbeat);
-        await releaseEventLogLock(lockPath, ownerPath, owner);
+        if (transactionOpen) {
+          try {
+            database.exec("ROLLBACK");
+          } catch {
+            // A process crash lets SQLite roll back the transaction itself.
+          }
+        }
+        database.close();
       }
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (claimCreated && !claimed) await rm(claimPath, { recursive: true, force: true });
-      if (claimed || (code !== "EEXIST" && code !== "ENOTEMPTY" && code !== "EISDIR")) {
-        throw error;
+      try {
+        database?.close();
+      } catch {
+        // Preserve the operation or SQLite error below.
       }
-      await reclaimStaleEventLogLock(lockPath);
-      await new Promise<void>((resolve) => setTimeout(resolve, eventLogLockRetryMs));
+      if (!isSqliteBusy(error)) throw error;
+      await sleep(eventLogLockRetryMs);
     }
   }
 }

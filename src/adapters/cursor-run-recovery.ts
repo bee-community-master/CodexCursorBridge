@@ -57,6 +57,16 @@ export function supportsRunOperation(
   return typeof run[operation] === "function";
 }
 
+export function unsupportedRunOperation(
+  run: Run,
+  requiresCancel = false,
+): "wait" | "stream" | "cancel" | undefined {
+  if (!supportsRunOperation(run, "wait")) return "wait";
+  if (!supportsRunOperation(run, "stream")) return "stream";
+  if (requiresCancel && !supportsRunOperation(run, "cancel")) return "cancel";
+  return undefined;
+}
+
 export function recoveredRunMetadata(
   run: Run,
 ): Pick<ImplementerOutcome, "inputTokens" | "outputTokens" | "requestId"> {
@@ -73,10 +83,11 @@ export function detachedRunOutcome(
   run: Run,
   attempt: Attempt,
   agentId: string,
+  unsupportedOperation: "wait" | "stream" | "cancel" = "wait",
 ): ImplementerOutcome {
   const reason = typeof run.unsupportedReason === "function"
-    ? run.unsupportedReason("wait")
-    : "The SDK did not expose a live wait capability for this running run.";
+    ? run.unsupportedReason(unsupportedOperation)
+    : `The SDK did not expose a live ${unsupportedOperation} capability for this running run.`;
   return {
     status: "blocked",
     agentId,

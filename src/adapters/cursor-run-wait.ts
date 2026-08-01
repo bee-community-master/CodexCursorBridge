@@ -4,6 +4,7 @@ import type { Attempt } from "../domain/job.js";
 import { redactSensitiveText, safeErrorMessage } from "../application/redaction.js";
 import {
   cancellationRecoveryOutcome,
+  detachedRunOutcome,
   eventKey,
   stableEventValue,
   supportsRunOperation,
@@ -20,6 +21,8 @@ type SubmittedOutcome = {
   reason?: string | undefined;
 };
 
+const cancellationPollMs = 50;
+
 type CursorRunWaitState = Pick<
   PublicationStatePort,
   "isCancellationRequested"
@@ -32,6 +35,56 @@ function eventSummary(event: { type: string; name?: string; status?: string }): 
   return [event.type, event.name, event.status].filter(Boolean).join(" ");
 }
 
+type RunStreamEvent = { type: string; name?: string; status?: string };
+type StreamConsumeResult = "completed" | "cancellation-recovery";
+
+async function consumeRunStream(
+  run: Run,
+  jobId: string,
+  attempt: Attempt,
+  store: CursorRunWaitState,
+  logSafely: (message: string) => Promise<void>,
+  logEvent: (eventKey: string, message: string) => Promise<void>,
+  cancellationRecovery: Promise<void>,
+): Promise<StreamConsumeResult> {
+  const iterator = run.stream()[Symbol.asyncIterator]();
+  const occurrences = new Map<string, number>();
+  for (;;) {
+    const nextResult = iterator.next().then(
+      (result) => ({ kind: "event" as const, result }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    );
+    const winner = await Promise.race([
+      nextResult,
+      cancellationRecovery.then(() => ({ kind: "cancellation-recovery" as const })),
+    ]);
+    if (winner.kind === "cancellation-recovery") {
+      try {
+        void Promise.resolve(iterator.return?.()).catch(() => undefined);
+      } catch {
+        // The SDK iterator may not support local shutdown after a detached run.
+      }
+      return "cancellation-recovery";
+    }
+    if (winner.kind === "error") throw winner.error;
+    if (winner.result.done) return "completed";
+    const event = winner.result.value as RunStreamEvent;
+    const signature = stableEventValue(event);
+    const occurrence = occurrences.get(signature) ?? 0;
+    occurrences.set(signature, occurrence + 1);
+    await deliverRunEvent(
+      jobId,
+      attempt,
+      store,
+      run.id,
+      eventKey(event, occurrence),
+      redactSensitiveText(eventSummary(event)),
+      logEvent,
+      logSafely,
+    );
+  }
+}
+
 export async function waitForOutcome(
   run: Run,
   agent: SDKAgent,
@@ -42,14 +95,30 @@ export async function waitForOutcome(
   logSafely: (message: string) => Promise<void>,
   logEvent: (eventKey: string, message: string) => Promise<void>,
 ): Promise<ImplementerOutcome> {
+  if (!supportsRunOperation(run, "wait")) {
+    return detachedRunOutcome(run, attempt, agent.agentId, "wait");
+  }
+  if (!supportsRunOperation(run, "stream")) {
+    return detachedRunOutcome(run, attempt, agent.agentId, "stream");
+  }
+
   let cancellationCheckActive = false;
+  let cancellationRecoveryRequested = false;
+  let resolveCancellationRecovery!: () => void;
+  const cancellationRecovery = new Promise<void>((resolve) => {
+    resolveCancellationRecovery = resolve;
+  });
   const cancellationTimer = setInterval(() => {
-    if (cancellationCheckActive || !store.isCancellationRequested(jobId)) return;
+    if (
+      cancellationCheckActive
+      || cancellationRecoveryRequested
+      || !store.isCancellationRequested(jobId)
+    ) return;
     cancellationCheckActive = true;
     if (!supportsRunOperation(run, "cancel")) {
-      void logSafely(
-        `RECOVERY_REQUIRED: Cursor cancellation is unavailable for run ${run.id}; no cancel mutation was attempted.`,
-      );
+      cancellationRecoveryRequested = true;
+      void logSafely(`RECOVERY_REQUIRED: Cursor cancellation is unavailable for run ${run.id}; no cancel mutation was attempted.`);
+      resolveCancellationRecovery();
       cancellationCheckActive = false;
       return;
     }
@@ -58,26 +127,25 @@ export async function waitForOutcome(
       .finally(() => {
         cancellationCheckActive = false;
       });
-  }, 500);
+  }, cancellationPollMs);
   cancellationTimer.unref();
   try {
     await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id);
-    const occurrences = new Map<string, number>();
     try {
-      for await (const event of run.stream()) {
-        const signature = stableEventValue(event);
-        const occurrence = occurrences.get(signature) ?? 0;
-        occurrences.set(signature, occurrence + 1);
-        await deliverRunEvent(
-          jobId,
-          attempt,
-          store,
-          run.id,
-          eventKey(event, occurrence),
-          redactSensitiveText(eventSummary(event)),
-          logEvent,
-          logSafely,
-        );
+      const streamResult = await consumeRunStream(
+        run,
+        jobId,
+        attempt,
+        store,
+        logSafely,
+        logEvent,
+        cancellationRecovery,
+      );
+      if (streamResult === "cancellation-recovery") {
+        if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
+          throw new CursorRunEventDeliveryUncertainError(run.id);
+        }
+        return cancellationRecoveryOutcome(run, attempt, agent.agentId);
       }
     } catch (error) {
       if (!await drainPendingRunEvents(jobId, attempt, store, logEvent, logSafely, run.id)) {
