@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-export const STATE_SCHEMA_VERSION = 3;
+export const STATE_SCHEMA_VERSION = 5;
 
 export function migrateStateDatabase(database: DatabaseSync): void {
   const versionRow = database.prepare("PRAGMA user_version").get() as Record<string, unknown>;
@@ -79,6 +79,19 @@ export function migrateStateDatabase(database: DatabaseSync): void {
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS effects_job_idx ON effects(job_id, kind);
+      CREATE TABLE IF NOT EXISTS cursor_run_event_consumptions (
+        run_id TEXT NOT NULL,
+        event_key TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        event_summary TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        consumed_at TEXT NOT NULL,
+        logged_at TEXT,
+        PRIMARY KEY(run_id, event_key)
+      );
+      CREATE INDEX IF NOT EXISTS cursor_run_event_consumptions_job_idx
+        ON cursor_run_event_consumptions(job_id, attempt_id);
       UPDATE jobs
       SET status = 'FAILED',
           error_message = COALESCE(
@@ -99,6 +112,23 @@ export function migrateStateDatabase(database: DatabaseSync): void {
     }
     if (!attemptColumns.has("git_config_digest")) {
       database.exec("ALTER TABLE attempts ADD COLUMN git_config_digest TEXT");
+    }
+    const eventConsumptionColumns = new Set(
+      (database.prepare("PRAGMA table_info(cursor_run_event_consumptions)").all() as Array<Record<string, unknown>>)
+        .map((row) => String(row.name)),
+    );
+    if (!eventConsumptionColumns.has("event_summary")) {
+      database.exec(
+        "ALTER TABLE cursor_run_event_consumptions ADD COLUMN event_summary TEXT NOT NULL DEFAULT ''",
+      );
+    }
+    if (!eventConsumptionColumns.has("status")) {
+      database.exec(
+        "ALTER TABLE cursor_run_event_consumptions ADD COLUMN status TEXT NOT NULL DEFAULT 'LOGGED'",
+      );
+    }
+    if (!eventConsumptionColumns.has("logged_at")) {
+      database.exec("ALTER TABLE cursor_run_event_consumptions ADD COLUMN logged_at TEXT");
     }
     database.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`);
     database.exec("COMMIT");

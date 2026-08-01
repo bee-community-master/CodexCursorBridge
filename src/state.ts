@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { WorkerStatePort } from "./application/workflow-ports.js";
+import type {
+  PendingRunEvent,
+  RunEventDeliveryState,
+  WorkerStatePort,
+} from "./application/workflow-ports.js";
 import {
   rowToAttempt,
   rowToJob,
@@ -356,6 +360,18 @@ export class JobStore implements WorkerStatePort {
     const attempt = this.getAttempt(attemptId);
     if (!attempt) throw new Error(`Unknown attempt: ${attemptId}`);
     return this.transitionAttempt(attemptId, workerToken, [attempt.status], attempt.status, fields);
+  }
+
+  beginRunEvent(jobId: string, attemptId: string, workerToken: string, runId: string, eventKey: string, eventSummary: string): RunEventDeliveryState {
+    return this.#ledger.beginRunEvent(jobId, attemptId, workerToken, runId, eventKey, eventSummary);
+  }
+
+  completeRunEvent(jobId: string, attemptId: string, workerToken: string, runId: string, eventKey: string): void {
+    this.#ledger.completeRunEvent(jobId, attemptId, workerToken, runId, eventKey);
+  }
+
+  listPendingRunEvents(jobId: string, attemptId: string, workerToken: string, runId: string): PendingRunEvent[] {
+    return this.#ledger.listPendingRunEvents(jobId, attemptId, workerToken, runId);
   }
 
   beginRepairAttempt(

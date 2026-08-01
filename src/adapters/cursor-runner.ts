@@ -35,42 +35,48 @@ import {
   transportFailureSummary,
   transportRetryDelayMs,
 } from "./cursor-transport.js";
+import {
+  detachedRunOutcome,
+  recoveredRunMetadata,
+  supportsRunOperation,
+  unsupportedRunOperation,
+} from "./cursor-run-recovery.js";
+import {
+  CursorRunEventDeliveryUncertainError,
+  drainPendingRunEvents,
+} from "./cursor-run-event-outbox.js";
+import { waitForOutcome } from "./cursor-run-wait.js";
 import type { PreparedWorktreeGuard } from "./prepared-worktree-guard.js";
 import type { WorkflowLogger } from "./workflow-logger.js";
-
 type CursorRunStatePort = Pick<
   PublicationStatePort,
-  "isCancellationRequested" | "updateAttempt"
+  "isCancellationRequested"
+  | "updateAttempt"
+  | "beginRunEvent"
+  | "completeRunEvent"
+  | "listPendingRunEvents"
 >;
-
 interface LocalCursorRunOptions {
   runtime: "local";
   cwd: string;
   store: JsonlLocalAgentStore;
 }
-
 type RecoveredCursorRun =
   | { kind: "active"; run: Run }
   | { kind: "outcome"; outcome: ImplementerOutcome }
+  | { kind: "recovery-required"; outcome: ImplementerOutcome }
   | { kind: "new"; previousRunId?: string };
-
 const outcomeSchema = z.object({
   status: z.enum(["completed", "blocked", "needs_input"]),
   summary: z.string().min(1).max(8_000),
   reason: z.string().min(1).max(4_000).optional(),
 });
-
-function eventSummary(event: { type: string; name?: string; status?: string }): string {
-  return [event.type, event.name, event.status].filter(Boolean).join(" ");
-}
-
 function hasPersistedOutcome(
   attempt: Attempt,
 ): attempt is Attempt & Required<Pick<Attempt, "outcome" | "outcomeSummary">> {
   return attempt.outcome !== undefined
     && attempt.outcomeSummary !== undefined;
 }
-
 function isForceSendMarker(error: unknown): boolean {
   const candidate = error as { message?: unknown; code?: unknown } | undefined;
   const values = [
@@ -83,19 +89,9 @@ function isForceSendMarker(error: unknown): boolean {
 }
 
 function isRecoverableCursorRunError(error: unknown): boolean {
-  return isTransientCursorTransportError(error) || isForceSendMarker(error);
-}
-
-function recoveredRunMetadata(
-  run: Run,
-): Pick<ImplementerOutcome, "inputTokens" | "outputTokens" | "requestId"> {
-  return {
-    ...(run.requestId ? { requestId: run.requestId } : {}),
-    ...(run.usage ? {
-      inputTokens: run.usage.inputTokens,
-      outputTokens: run.usage.outputTokens,
-    } : {}),
-  };
+  return error instanceof CursorRunEventDeliveryUncertainError
+    || isTransientCursorTransportError(error)
+    || isForceSendMarker(error);
 }
 
 function restoredOutcome(
@@ -207,9 +203,20 @@ export class CursorImplementer {
         });
       }),
     };
+    const pendingEventsDelivered = await drainPendingRunEvents(
+      this.#jobId,
+      attempt,
+      this.#store,
+      this.#logEvent.bind(this),
+      this.#logSafely.bind(this),
+    );
+    if (!pendingEventsDelivered && attempt.cursorRunId) {
+      throw new CursorRunEventDeliveryUncertainError(attempt.cursorRunId);
+    }
     const recovered = await this.#recoverDurableRun(prepared, attempt);
-    if (recovered.kind === "outcome") return recovered.outcome;
-
+    if (recovered.kind === "outcome" || recovered.kind === "recovery-required") {
+      return recovered.outcome;
+    }
     const agent = await this.#createOrResumeAgentWithRetry(
       prepared,
       task,
@@ -284,10 +291,10 @@ export class CursorImplementer {
       }
     }
   }
-
   async cancel(attempt: Attempt): Promise<void> {
     const active = this.#activeRuns.get(attempt.id);
     if (active) {
+      if (!supportsRunOperation(active, "wait") || !supportsRunOperation(active, "cancel")) throw new Error(`RECOVERY_REQUIRED: Cursor run ${active.id} is detached; cancellation cannot be confirmed without a live executor.`);
       await active.cancel();
       await active.wait();
       return;
@@ -300,13 +307,20 @@ export class CursorImplementer {
     } as const;
     const current = await Agent.getRun(attempt.cursorRunId, options);
     if (current.status !== "running") return;
+    if (
+      !supportsRunOperation(current, "wait")
+      || !supportsRunOperation(current, "cancel")
+    ) {
+      throw new Error(
+        `RECOVERY_REQUIRED: Cursor run ${attempt.cursorRunId} is detached; cancellation cannot be confirmed without a live executor.`,
+      );
+    }
     await Agent.cancelRun(attempt.cursorRunId, options);
     const persisted = await Agent.getRun(attempt.cursorRunId, options);
     if (persisted.status === "running") {
       throw new Error(`Cursor run is still active after cancellation: ${attempt.cursorRunId}`);
     }
   }
-
   async #createOrResumeAgent(
     prepared: PreparedWorktree,
     task: ApprovedTask,
@@ -338,7 +352,6 @@ export class CursorImplementer {
       ? Agent.resume(attempt.cursorAgentId, options)
       : Agent.create({ ...options, idempotencyKey: `bridge-agent:${attempt.id}` });
   }
-
   async #createOrResumeAgentWithRetry(
     prepared: PreparedWorktree,
     task: ApprovedTask,
@@ -361,7 +374,6 @@ export class CursorImplementer {
       `Cursor agent could not be resumed after ${CURSOR_TRANSPORT_MAX_ATTEMPTS} attempts: ${safeErrorMessage(lastError)}`,
     );
   }
-
   async #recoverDurableRun(
     prepared: PreparedWorktree,
     attempt: Attempt,
@@ -384,17 +396,34 @@ export class CursorImplementer {
         );
       }
       const recoveredAgentId = agentId ?? priorRun.agentId;
-      if (priorRun.status === "running" && hasPersistedOutcome(attempt)) {
-        priorRun = await this.#stopPriorRun(runId, options);
+      if (priorRun.status === "running") {
+        const unsupportedOperation = unsupportedRunOperation(priorRun, hasPersistedOutcome(attempt));
+        if (unsupportedOperation) {
+          return {
+            kind: "recovery-required",
+            outcome: detachedRunOutcome(priorRun, attempt, recoveredAgentId, unsupportedOperation),
+          };
+        }
+        if (hasPersistedOutcome(attempt)) {
+          priorRun = await this.#stopPriorRun(runId, options);
+        }
       }
-      if (priorRun.status === "running") return { kind: "active", run: priorRun };
+      if (priorRun.status === "running") {
+        return { kind: "active", run: priorRun };
+      }
       const outcome = restoredOutcome(priorRun, attempt, recoveredAgentId, runId);
       if (outcome) return { kind: "outcome", outcome };
-
       // A terminal transport error is safe to follow up only after the local
       // store confirms that no newer run is active for this agent.
       const active = await this.#findActiveRun(recoveredAgentId, options);
       if (active) {
+        const unsupportedOperation = unsupportedRunOperation(active);
+        if (unsupportedOperation) {
+          return {
+            kind: "recovery-required",
+            outcome: detachedRunOutcome(active, attempt, recoveredAgentId, unsupportedOperation),
+          };
+        }
         await this.#bindRun(attempt, recoveredAgentId, active);
         return { kind: "active", run: active };
       }
@@ -403,12 +432,18 @@ export class CursorImplementer {
     if (!agentId) return { kind: "new" };
     const active = await this.#findActiveRun(agentId, options);
     if (active) {
+      const unsupportedOperation = unsupportedRunOperation(active);
+      if (unsupportedOperation) {
+        return {
+          kind: "recovery-required",
+          outcome: detachedRunOutcome(active, attempt, agentId, unsupportedOperation),
+        };
+      }
       await this.#bindRun(attempt, agentId, active);
       return { kind: "active", run: active };
     }
     return { kind: "new" };
   }
-
   async #readPriorRun(
     runId: string,
     options: LocalCursorRunOptions,
@@ -426,7 +461,6 @@ export class CursorImplementer {
       throw new Error(`Could not safely recover the prior Cursor run: ${detail}`);
     }
   }
-
   async #findActiveRun(
     agentId: string,
     options: LocalCursorRunOptions,
@@ -452,7 +486,6 @@ export class CursorImplementer {
       throw new Error(`Could not reconcile local Cursor runs: ${detail}`);
     }
   }
-
   async #bindRun(attempt: Attempt, agentId: string, run: Run): Promise<void> {
     this.#store.updateAttempt(attempt.id, attempt.workerToken, {
       cursorAgentId: agentId,
@@ -512,7 +545,6 @@ export class CursorImplementer {
       `Cursor send remained ambiguous after ${CURSOR_TRANSPORT_MAX_ATTEMPTS} attempts: ${transportFailureSummary(lastError)}`,
     );
   }
-
   async #waitForOutcomeWithTransportRetry(
     run: Run,
     agent: SDKAgent,
@@ -521,10 +553,24 @@ export class CursorImplementer {
     submitted: () => z.infer<typeof outcomeSchema> | undefined,
   ): Promise<ImplementerOutcome> {
     let current = run;
+    const cancellationFence = new Set<string>();
     for (let retry = 1; retry <= CURSOR_TRANSPORT_MAX_ATTEMPTS; retry += 1) {
       try {
-        return await this.#waitForOutcome(current, agent, submitted);
+        if (current.status === "running" && !supportsRunOperation(current, "wait")) return detachedRunOutcome(current, attempt, agent.agentId, "wait");
+        if (current.status === "running" && !supportsRunOperation(current, "stream")) return detachedRunOutcome(current, attempt, agent.agentId, "stream");
+        return await waitForOutcome(
+          current,
+          agent,
+          attempt,
+          this.#jobId,
+          this.#store,
+          submitted,
+          this.#logSafely.bind(this),
+          this.#logEvent.bind(this),
+          cancellationFence,
+        );
       } catch (error) {
+        if (error instanceof CursorRunEventDeliveryUncertainError) throw error;
         if (!isRecoverableCursorRunError(error)) throw error;
         await this.#logTransportFailure("monitor", retry, error);
         const options: LocalCursorRunOptions = {
@@ -539,6 +585,7 @@ export class CursorImplementer {
           options,
         );
         if (rebound.kind === "outcome") return rebound.outcome;
+        if (rebound.kind === "recovery-required") return rebound.outcome;
         if (rebound.kind === "active") {
           current = rebound.run;
           if (retry < CURSOR_TRANSPORT_MAX_ATTEMPTS) {
@@ -563,11 +610,26 @@ export class CursorImplementer {
     options: LocalCursorRunOptions,
   ): Promise<RecoveredCursorRun> {
     const run = await this.#readPriorRun(runId, options);
-    if (run.status === "running") return { kind: "active", run };
+    if (run.status === "running") {
+      const unsupportedOperation = unsupportedRunOperation(run);
+      return unsupportedOperation
+        ? {
+          kind: "recovery-required",
+          outcome: detachedRunOutcome(run, attempt, agentId, unsupportedOperation),
+        }
+        : { kind: "active", run };
+    }
     const outcome = restoredOutcome(run, attempt, agentId, runId);
     if (outcome) return { kind: "outcome", outcome };
     const active = await this.#findActiveRun(agentId, options);
     if (active) {
+      const unsupportedOperation = unsupportedRunOperation(active);
+      if (unsupportedOperation) {
+        return {
+          kind: "recovery-required",
+          outcome: detachedRunOutcome(active, attempt, agentId, unsupportedOperation),
+        };
+      }
       await this.#bindRun(attempt, agentId, active);
       return { kind: "active", run: active };
     }
@@ -593,10 +655,12 @@ export class CursorImplementer {
     }
   }
 
+  async #logEvent(eventKey: string, message: string): Promise<void> {
+    await (this.#logger.logEvent?.(eventKey, message) ?? this.#logger.log(message));
+  }
+
   async #delayAfterTransportFailure(retry: number): Promise<void> {
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, transportRetryDelayMs(retry));
-    });
+    await new Promise<void>((resolve) => setTimeout(resolve, transportRetryDelayMs(retry)));
   }
 
   async #stopPriorRun(
@@ -631,64 +695,5 @@ export class CursorImplementer {
       );
     }
     return confirmed;
-  }
-
-  async #waitForOutcome(
-    run: Run,
-    agent: SDKAgent,
-    submitted: () => z.infer<typeof outcomeSchema> | undefined,
-  ): Promise<ImplementerOutcome> {
-    let cancellationCheckActive = false;
-    const cancellationTimer = setInterval(() => {
-      if (cancellationCheckActive || !this.#store.isCancellationRequested(this.#jobId)) return;
-      cancellationCheckActive = true;
-      void run.cancel()
-        .catch((error: unknown) =>
-          this.#logSafely(`Cursor cancellation failed: ${safeErrorMessage(error)}`))
-        .finally(() => {
-          cancellationCheckActive = false;
-        });
-    }, 500);
-    cancellationTimer.unref();
-    try {
-      for await (const event of run.stream()) await this.#logSafely(eventSummary(event));
-      const result = await run.wait();
-      if (result.status === "cancelled" && this.#store.isCancellationRequested(this.#jobId)) {
-        return {
-          status: "blocked",
-          agentId: agent.agentId,
-          runId: run.id,
-          ...(result.requestId ? { requestId: result.requestId } : {}),
-          summary: "Cancelled by user request.",
-          reason: "Cancellation was requested by the bridge.",
-          ...(result.usage ? {
-            inputTokens: result.usage.inputTokens,
-            outputTokens: result.usage.outputTokens,
-          } : {}),
-        };
-      }
-      if (result.status !== "finished") {
-        throw new Error(result.error?.message ?? `Cursor run ended with ${result.status}`);
-      }
-      const structured = submitted() ?? {
-        status: "needs_input" as const,
-        summary: redactSensitiveText(result.result ?? "Cursor did not submit a structured outcome."),
-        reason: "Cursor completed without calling submit_bridge_outcome.",
-      };
-      return {
-        status: structured.status,
-        agentId: agent.agentId,
-        runId: run.id,
-        ...(result.requestId ? { requestId: result.requestId } : {}),
-        summary: redactSensitiveText(structured.summary),
-        ...(structured.reason ? { reason: redactSensitiveText(structured.reason) } : {}),
-        ...(result.usage ? {
-          inputTokens: result.usage.inputTokens,
-          outputTokens: result.usage.outputTokens,
-        } : {}),
-      };
-    } finally {
-      clearInterval(cancellationTimer);
-    }
   }
 }

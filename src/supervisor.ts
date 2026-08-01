@@ -10,6 +10,8 @@ import { processClaim } from "./worker.js";
 
 const claimLeaseMs = 60_000;
 const heartbeatIntervalMs = 15_000;
+const shutdownPollMs = 25;
+const shutdownGraceMs = 250;
 const idlePollMs = 1_000;
 const supervisorBackoffBaseMs = 250;
 const supervisorBackoffCapMs = 30_000;
@@ -22,6 +24,13 @@ export interface SupervisorLoopOptions {
   shouldStop?: () => boolean;
   sleep?: (milliseconds: number) => Promise<void>;
   processClaim?: typeof processClaim;
+}
+
+export class SupervisorShutdownError extends Error {
+  constructor() {
+    super("Supervisor shutdown requires the top-level owner to exit after cleanup.");
+    this.name = "SupervisorShutdownError";
+  }
 }
 
 export function supervisorBackoffMs(failureStreak: number): number {
@@ -43,6 +52,30 @@ function delay(milliseconds: number, shouldStop: () => boolean): Promise<void> {
       resolve();
     }
   });
+}
+
+function watchForShutdown(shouldStop: () => boolean): {
+  promise: Promise<void>;
+  cancel: () => void;
+} {
+  let timer: NodeJS.Timeout | undefined;
+  const promise = new Promise<void>((resolve) => {
+    if (shouldStop()) {
+      resolve();
+      return;
+    }
+    timer = setInterval(() => {
+      if (!shouldStop()) return;
+      if (timer) clearInterval(timer);
+      resolve();
+    }, shutdownPollMs);
+  });
+  return {
+    promise,
+    cancel: (): void => {
+      if (timer) clearInterval(timer);
+    },
+  };
 }
 
 async function logSupervisorFailure(
@@ -77,13 +110,21 @@ export async function runSupervisor(
   const heartbeatMs = options.heartbeatIntervalMs ?? heartbeatIntervalMs;
   const idleMs = options.idlePollMs ?? idlePollMs;
   const shouldStop = options.shouldStop ?? ((): boolean => false);
-  const sleep = options.sleep ?? ((milliseconds: number): Promise<void> =>
-    delay(milliseconds, shouldStop));
   const processClaimImpl = options.processClaim ?? processClaim;
   const workerToken = options.workerToken ?? `supervisor:${process.pid}:${randomUUID()}`;
   let failureStreak = 0;
+  let signalRequested = false;
+  const stopRequested = (): boolean => shouldStop() || signalRequested;
+  const sleep = options.sleep ?? ((milliseconds: number): Promise<void> =>
+    delay(milliseconds, stopRequested));
+  const signalHandler = (): void => {
+    signalRequested = true;
+  };
+  process.once("SIGTERM", signalHandler);
+  process.once("SIGINT", signalHandler);
 
-  while (!shouldStop()) {
+  try {
+    while (!stopRequested()) {
     let claim;
     try {
       claim = store.claimNext(workerToken, leaseMs);
@@ -110,11 +151,34 @@ export async function runSupervisor(
         void logSupervisorFailure(paths, "heartbeat", error);
       }
     }, heartbeatMs);
-    heartbeat.unref();
+    const shutdown = watchForShutdown(stopRequested);
+    const processPromise = Promise.resolve().then(() => processClaimImpl(store, claim, paths));
+    let processSettled = false;
+    processPromise.finally(() => {
+      processSettled = true;
+    }).catch(() => undefined);
     try {
-      await processClaimImpl(store, claim, paths);
+      const result = await Promise.race([
+        processPromise.then(
+          () => ({ kind: "completed" as const }),
+          (error: unknown) => ({ kind: "failed" as const, error }),
+        ),
+        shutdown.promise.then(() => ({ kind: "shutdown" as const })),
+      ]);
+      if (result.kind === "shutdown") {
+        clearInterval(heartbeat);
+        shutdown.cancel();
+        await Promise.race([
+          processPromise.then(() => undefined, () => undefined),
+          delay(shutdownGraceMs, () => false),
+        ]);
+        if (!processSettled && signalRequested) throw new SupervisorShutdownError();
+        continue;
+      }
+      if (result.kind === "failed") throw result.error;
       failureStreak = 0;
     } catch (error) {
+      if (error instanceof SupervisorShutdownError) throw error;
       // processClaim normally fences and records workflow failures itself. A
       // last-resort guard keeps an unexpected adapter/runtime exception from
       // crashing launchd while the durable lease remains reclaimable.
@@ -124,7 +188,12 @@ export async function runSupervisor(
       await sleep(supervisorBackoffMs(failureStreak));
     } finally {
       clearInterval(heartbeat);
+      shutdown.cancel();
     }
+  }
+  } finally {
+    process.removeListener("SIGTERM", signalHandler);
+    process.removeListener("SIGINT", signalHandler);
   }
 }
 
@@ -132,6 +201,7 @@ async function main(): Promise<void> {
   const paths = runtimePaths();
   const store = new JobStore(paths.databaseFile);
   let stopping = false;
+  let forceExit = false;
   process.once("SIGTERM", () => {
     stopping = true;
   });
@@ -140,9 +210,13 @@ async function main(): Promise<void> {
   });
   try {
     await runSupervisor(store, paths, { shouldStop: () => stopping });
+  } catch (error) {
+    if (error instanceof SupervisorShutdownError) forceExit = true;
+    else throw error;
   } finally {
     store.close();
   }
+  if (forceExit) process.exit(0);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

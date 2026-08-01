@@ -208,6 +208,35 @@ export interface PublicationStatePort extends JobStateReader {
   isCancellationRequested(jobId: string): boolean;
   update(id: string, fields: Partial<Job>): void;
   updateAttempt(attemptId: string, workerToken: string, fields: Partial<Attempt>): Attempt;
+  beginRunEvent(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    runId: string,
+    eventKey: string,
+    eventSummary: string,
+  ): RunEventDeliveryState;
+  completeRunEvent(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    runId: string,
+    eventKey: string,
+  ): void;
+  listPendingRunEvents(
+    jobId: string,
+    attemptId: string,
+    workerToken: string,
+    runId: string,
+  ): PendingRunEvent[];
+}
+
+export type RunEventDeliveryState = "NEW" | "PENDING" | "LOGGED";
+
+export interface PendingRunEvent {
+  runId: string;
+  eventKey: string;
+  eventSummary: string;
 }
 
 export type WorkerStatePort = WorkflowStatePort & PublicationStatePort;
