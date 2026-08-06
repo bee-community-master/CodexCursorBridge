@@ -48,15 +48,33 @@ describe("workflow artifact writer", () => {
       task: approvedTask({ mode: "new_draft" }),
       verification: [{
         command: "pnpm test",
+        argv: ["/usr/bin/node", "/private/tmp/verify-cache/bin/pnpm.mjs", "test"],
         status: "failed",
         durationMs: 10,
         output: "failing assertion\napi_key=super-secret-value",
+        packageManager: {
+          name: "pnpm",
+          binary: "pnpm",
+          version: "11.10.0",
+          digest: "sha512.abc123",
+          artifactDigest: `sha256:${"a".repeat(64)}`,
+          runtime: "node",
+          entrypoint: "bin/pnpm.mjs",
+          executable: "/private/tmp/verify-cache/bin/pnpm.mjs",
+          source: "verifier-owned-corepack-cache",
+          network: "denied",
+          scope: "top_level_only",
+        },
       }],
       error: "Verification failed with token: another-secret-value",
     });
     const content = await readFile(report, "utf8");
 
     expect(content).toContain("failing assertion");
+    expect(content).toContain("pnpm@11.10.0 digest=sha512.abc123");
+    expect(content).toContain("network=denied");
+    expect(content).toContain("scope=top_level_only");
+    expect(content).toContain('argv: ["/usr/bin/node","/private/tmp/verify-cache/bin/pnpm.mjs","test"]');
     expect(content).not.toContain("super-secret-value");
     expect(content).not.toContain("another-secret-value");
   });
@@ -116,6 +134,19 @@ describe("workflow artifact writer", () => {
         status: "failed",
         durationMs: 10,
         output: "api_key=attestation-secret-value",
+        packageManager: {
+          name: "pnpm",
+          binary: "pnpm",
+          version: "11.10.0",
+          digest: "sha512.attestation",
+          artifactDigest: `sha256:${"b".repeat(64)}`,
+          runtime: "node",
+          entrypoint: "bin/pnpm.mjs",
+          executable: "/private/tmp/verify-cache/bin/pnpm.mjs",
+          source: "verifier-owned-corepack-cache",
+          network: "denied",
+          scope: "top_level_only",
+        },
       }],
     });
 
@@ -123,6 +154,10 @@ describe("workflow artifact writer", () => {
     expect((await stat(attestationPath)).mode & 0o777).toBe(0o600);
     expect(await readFile(attestationPath, "utf8"))
       .not.toContain("attestation-secret-value");
+    expect(await readFile(attestationPath, "utf8"))
+      .toContain("sha512.attestation");
+    expect(await readFile(attestationPath, "utf8"))
+      .toContain('"scope": "top_level_only"');
   });
 
   it("uses an immutable owner-specific report path for reclaimed attempts", async () => {

@@ -132,6 +132,35 @@ export async function captureWorktreeIdentity(
   return { gitFileContent, gitDir, commonGitDir, configDigest };
 }
 
+export async function assertStandaloneCloneIdentity(repositoryRoot: string): Promise<void> {
+  try {
+    const metadata = await lstat(path.join(repositoryRoot, ".git"));
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error("linked worktree metadata");
+    }
+    const gitDir = await realpath(await git(
+      repositoryRoot,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-dir",
+    ));
+    const commonGitDir = await realpath(await git(
+      repositoryRoot,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ));
+    const dotGit = await realpath(path.join(repositoryRoot, ".git"));
+    if (gitDir !== commonGitDir || dotGit !== gitDir) {
+      throw new Error("linked worktree metadata");
+    }
+  } catch {
+    throw new Error(
+      "Repository path must be a standalone Git clone; linked worktrees are not supported (.git must be a directory and git-dir must equal git-common-dir)",
+    );
+  }
+}
+
 export async function assertWorktreeIdentity(
   worktree: string,
   identity: WorktreeIdentity,
@@ -158,7 +187,11 @@ export async function assertWorktreeIdentity(
       throw new Error("Worktree Git configuration changed after preparation");
     }
   } catch (error) {
-    if (error instanceof Error && /Worktree Git metadata/.test(error.message)) throw error;
+    if (
+      error instanceof Error
+      && (/Worktree Git metadata/.test(error.message)
+        || /Worktree Git configuration changed/.test(error.message))
+    ) throw error;
     throw new Error("Worktree Git metadata identity could not be verified");
   }
 }

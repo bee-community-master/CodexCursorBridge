@@ -12,6 +12,7 @@ export {
   githubOriginSlug,
 } from "./adapters/git-remote.js";
 export {
+  assertStandaloneCloneIdentity,
   assertWorktreeIdentity,
   captureWorktreeIdentity,
 } from "./adapters/git-worktree-identity.js";

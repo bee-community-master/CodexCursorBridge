@@ -9,6 +9,9 @@ const hashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const gitObjectSchema = z.string().regex(/^[a-f0-9]{40,64}$/);
 const reservedVerificationEnvironment = new Set([
   "CI",
+  "COREPACK_DEFAULT_TO_LATEST",
+  "COREPACK_ENABLE_PROJECT_SPEC",
+  "COREPACK_HOME",
   "HOME",
   "LANG",
   "LC_ALL",
@@ -47,6 +50,8 @@ const safeVerificationEnv = z.record(z.string().regex(/^[A-Z][A-Z0-9_]*$/), z.st
     }
     const reservedNames = Object.keys(env).filter((name) =>
       reservedVerificationEnvironment.has(name)
+      || /^COREPACK_/.test(name)
+      || /^(?:NPM|PNPM)_CONFIG_(?:MANAGE_PACKAGE_MANAGER_VERSIONS|PACKAGE_MANAGER_STRICT|PM_ON_FAIL)$/.test(name)
       || /^(?:DYLD|LD)_/.test(name),
     );
     if (reservedNames.length > 0) {

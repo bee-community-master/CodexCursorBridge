@@ -9,7 +9,7 @@ The main Codex agent calls the narrow Cursor Bridge MCP tools directly. A launch
 
 ## Task authoring
 
-1. Register the target repository once with `pnpm repo:add -- --alias <alias> --path <absolute-path>`.
+1. Register the target repository once with `pnpm repo:add -- --alias <alias> --path <absolute-path>`. The path must be a standalone clone: linked worktrees are rejected because `.git` must be a directory and `git-dir` must equal `git-common-dir`.
 2. Copy `examples/TASK-template.yaml` to `tasks/<alias>/TASK-<ID>.yaml`.
 3. Fill every acceptance, scope, verification, stop, limit, and PR-mode field. Never place secrets in a Task.
 4. Keep `status: draft` while discussing it.
@@ -25,6 +25,8 @@ Do not pass conversation history, a free-form prompt, shell commands, or reposit
 Use `cursor_get_task` for an explicit status check, `cursor_cancel_task` only on explicit cancellation, and `cursor_get_report` after a terminal state. Cancellation is confirmed asynchronously; `CANCEL_REQUESTED` is not yet `CANCELLED`. Once a job reaches `PUBLISHING`, publication is the point of no return: do not claim it was cancelled, and let the Bridge finish remote readback and delivery reconciliation.
 
 Successful delivery is `DELIVERED_REVIEW_REQUIRED` with a Draft PR, final tree hash, independent verification, and an attestation artifact. Existing PR mode also accepts only an open Draft PR in the registered repository. Delivery is ready for Codex/human review, not automatically ready to merge.
+
+Independent verification runs package-manager commands with the exact `packageManager` version declared by the candidate repository. Before dispatch, provision that exact version in the host Corepack cache (for example, with an explicit `corepack pack pnpm@<version>` operation), then create the Bridge-owned manifest with `pnpm package-manager:provision -- --version <version> --binary pnpm`. The verifier only stages that manager into a private read-only Corepack cache outside the writable scratch root, compares the copied tree and entrypoint with the owner-only manifest, then executes its fixed entrypoint through the verifier's Node runtime. The package-manager attestation is explicitly `scope=top_level_only`: package scripts may start candidate-controlled or dynamically selected child processes that are not independently attested. A staged PATH and local package-manager shadow denial are defense-in-depth checks, not a complete nested-process guarantee. It fails closed when the artifact is absent, pre-stage bytes differ from the trusted manifest, or staged content changes, keeps network access denied for the sandboxed command, rejects `COREPACK_*` task overrides and package-manager switching arguments, and records the actual command/argv, manager version, Corepack integrity, artifact digest, cache source, network policy, and scope in the report and attestation.
 
 ## Stop conditions
 

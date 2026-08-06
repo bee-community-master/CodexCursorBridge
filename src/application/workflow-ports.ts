@@ -37,6 +37,21 @@ export interface PreparedWorktree {
   gitIdentity?: WorktreeIdentity;
 }
 
+export interface PackageManagerAttestation {
+  name: string;
+  binary: "pnpm" | "pnpx";
+  version: string;
+  digest: string;
+  integrity?: string;
+  artifactDigest: string;
+  runtime: "node";
+  entrypoint: string;
+  executable: string;
+  source: "verifier-owned-corepack-cache";
+  network: "denied";
+  scope: "top_level_only";
+}
+
 export interface ImplementerOutcome {
   status: "completed" | "blocked" | "needs_input";
   agentId: string;
@@ -50,9 +65,11 @@ export interface ImplementerOutcome {
 
 export interface VerificationResult {
   command: string;
+  argv?: string[];
   status: "passed" | "failed";
   durationMs: number;
   output?: string;
+  packageManager?: PackageManagerAttestation;
 }
 
 export interface PublicationInput {

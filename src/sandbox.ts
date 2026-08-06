@@ -7,6 +7,10 @@ export interface VerificationSandboxInput {
   command: string;
   args: readonly string[];
   taskEnv?: Readonly<Record<string, string>>;
+  corepackHome?: string;
+  readOnlyRoots?: readonly string[];
+  pathPrefix?: readonly string[];
+  blockedProcessPaths?: readonly string[];
   baseEnv?: NodeJS.ProcessEnv;
 }
 
@@ -80,10 +84,16 @@ function ancestorLiterals(roots: readonly string[]): string[] {
   return [...ancestors];
 }
 
-function readableRoots(worktree: string, scratchDir: string): string[] {
+function readableRoots(
+  worktree: string,
+  scratchDir: string,
+  readOnlyRoots: readonly string[],
+): string[] {
   const roots = [
     worktree,
     scratchDir,
+    ...readOnlyRoots,
+    path.dirname(process.execPath),
     "/System",
     "/usr",
     "/bin",
@@ -97,15 +107,22 @@ function readableRoots(worktree: string, scratchDir: string): string[] {
   return [...new Set(roots.flatMap(pathVariants))];
 }
 
-function profile(worktree: string, scratchDir: string): string {
+function profile(
+  worktree: string,
+  scratchDir: string,
+  readOnlyRootsInput: readonly string[],
+  blockedProcessPaths: readonly string[],
+): string {
   const writableRoots = [...new Set([
     ...pathVariants(worktree),
     ...pathVariants(scratchDir),
   ])];
+  const readOnlyRoots = [...new Set(readOnlyRootsInput.flatMap(pathVariants))];
+  const blockedProcesses = [...new Set(blockedProcessPaths.flatMap(pathVariants))];
   const reads = [
-    ...readableRoots(worktree, scratchDir)
+    ...readableRoots(worktree, scratchDir, readOnlyRoots)
       .map((root) => `(subpath ${sandboxLiteral(root)})`),
-    ...ancestorLiterals(writableRoots)
+    ...ancestorLiterals([...writableRoots, ...readOnlyRoots])
       .map((root) => `(literal ${sandboxLiteral(root)})`),
   ].join(" ");
   const writes = writableRoots
@@ -118,6 +135,7 @@ function profile(worktree: string, scratchDir: string): string {
     "(allow sysctl-read)",
     "(allow mach-lookup)",
     '(deny mach-lookup (global-name "com.apple.securityd") (global-name "com.apple.securityd.system"))',
+    ...blockedProcesses.map((root) => `(deny process-exec (subpath ${sandboxLiteral(root)}))`),
     `(allow file-read* ${reads})`,
     `(allow file-write* ${writes} (literal "/dev/null"))`,
     "(deny network*)",
@@ -128,7 +146,10 @@ export function createVerificationSandbox(input: VerificationSandboxInput): Veri
   const baseEnv = input.baseEnv ?? process.env;
   const worktree = path.resolve(input.worktree);
   const scratchDir = path.resolve(input.scratchDir);
-  const pathValue = executablePath(baseEnv.PATH, [worktree, scratchDir]);
+  const pathValue = executablePath(
+    [...(input.pathPrefix ?? []), baseEnv.PATH ?? ""].join(path.delimiter),
+    [worktree, scratchDir],
+  );
   const env: NodeJS.ProcessEnv = {
     ...input.taskEnv,
     PATH: pathValue,
@@ -137,12 +158,22 @@ export function createVerificationSandbox(input: VerificationSandboxInput): Veri
     CI: "true",
     LANG: baseEnv.LANG ?? "en_US.UTF-8",
     LC_ALL: baseEnv.LC_ALL ?? baseEnv.LANG ?? "en_US.UTF-8",
+    ...(input.corepackHome ? {
+      COREPACK_HOME: path.resolve(input.corepackHome),
+      COREPACK_ENABLE_PROJECT_SPEC: "1",
+      COREPACK_DEFAULT_TO_LATEST: "0",
+    } : {}),
   };
 
   if (process.platform !== "darwin") throw new Error("Verification sandbox requires macOS");
   return {
     command: "/usr/bin/sandbox-exec",
-    args: ["-p", profile(worktree, scratchDir), input.command, ...input.args],
+    args: [
+      "-p",
+      profile(worktree, scratchDir, input.readOnlyRoots ?? [], input.blockedProcessPaths ?? []),
+      input.command,
+      ...input.args,
+    ],
     env,
   };
 }
